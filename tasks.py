@@ -46,9 +46,14 @@ def preprocess_data(ctx: Context) -> None:
 
 @task
 def benchmark(ctx: Context, extra: str = "") -> None:
-    """Run ONNX model benchmark locally."""
+    """Run ONNX model benchmark locally (Hydra overrides via ``extra``).
+
+    Example::
+
+        invoke benchmark --extra="experiment.name=lop7 benchmark.device=4"
+    """
     ctx.run(
-        f"PYTHONPATH=src python src/{PROJECT_NAME}/bechmark.py {extra}",
+        f"PYTHONPATH=src python src/{PROJECT_NAME}/benchmark.py {extra}",
         echo=True,
         pty=not WINDOWS,
     )
@@ -74,15 +79,15 @@ def _docker_run_benchmark(
     """Run a benchmark script inside a bind-mounted container.
 
     Uses ``--gpus all`` (default) so CUDA/NVML indices match the host. Selection
-    is done with ``--device``; do not use ``--gpus device=N`` if you need the
-    host GPU number preserved (NVIDIA remaps a single exposed GPU to index 0).
+    is done with ``benchmark.device``; do not use ``--gpus device=N`` if you need
+    the host GPU number preserved (NVIDIA remaps a single exposed GPU to index 0).
     """
     env_file = " --env-file .env" if os.path.isfile(".env") else ""
     # CUDA_DEVICE_ORDER keeps enumeration aligned with nvidia-smi PCI order.
     ctx.run(
         f'docker run --rm --gpus "{gpus}" -v "$(pwd):/workspace" -w /workspace{env_file} '
         f"-e PYTHONPATH=/workspace/src -e CUDA_DEVICE_ORDER=PCI_BUS_ID "
-        f"{DOCKER_BENCHMARK_IMAGE} {script} --device {device} {extra}",
+        f"{DOCKER_BENCHMARK_IMAGE} {script} benchmark.device={device} {extra}",
         echo=True,
         pty=not WINDOWS,
     )
@@ -121,18 +126,18 @@ def docker_benchmark(
 ) -> None:
     """Benchmark in Docker with the repo bind-mounted (defaults to host GPU #4).
 
-    All host GPUs stay visible with their original indices; ``--device`` selects
-    which one to use for inference and NVML energy metering.
+    All host GPUs stay visible with their original indices; ``--device`` maps to
+    Hydra ``benchmark.device`` for inference and NVML energy metering.
 
     Example::
 
-        invoke docker-benchmark --device=4 --extra="models/LOP7/model.onnx -o reports/out.json"
+        invoke docker-benchmark --device=4 --extra="experiment.name=lop7"
 
-    Legacy ``--gpus=device=4`` is accepted and converted to ``--gpus all --device 4``.
+    Legacy ``--gpus=device=4`` is accepted and converted to ``--gpus all`` + device 4.
     """
     device, gpus = _normalize_docker_gpu_selection(device, gpus)
     _docker_run_benchmark(
-        ctx, f"src/{PROJECT_NAME}/bechmark.py", device=device, extra=extra, gpus=gpus
+        ctx, f"src/{PROJECT_NAME}/benchmark.py", device=device, extra=extra, gpus=gpus
     )
 
 

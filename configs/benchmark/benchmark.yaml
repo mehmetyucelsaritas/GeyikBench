@@ -1,0 +1,14 @@
+# Default ONNX benchmark settings (overrides via CLI):
+#   benchmark.device=4 benchmark.runs=100
+#   benchmark.model=models/LOP7/nnlf_lop7_model_float.onnx
+# Optional batching (default is single-sample):
+#   benchmark.batch_size=8
+
+model: models/LOP7/nnlf_lop7_model_float.onnx
+device: 4
+warmup: 10
+runs: 50
+# Single-sample by default; override only when measuring batched inference.
+batch_size: 1
+# Written under the Hydra run dir so each experiment keeps its own report.
+output: ${hydra:runtime.output_dir}/result.json

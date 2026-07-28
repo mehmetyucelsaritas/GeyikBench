@@ -14,8 +14,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+import hydra
 import numpy as np
-import typer
+from hydra.utils import to_absolute_path
+from omegaconf import DictConfig, OmegaConf
 from pynvml import (
     NVMLError,
     nvmlDeviceGetHandleByIndex,
@@ -25,8 +27,6 @@ from pynvml import (
     nvmlInit,
     nvmlShutdown,
 )
-
-app = typer.Typer(add_completion=False, pretty_exceptions_show_locals=False)
 
 
 def _nvidia_lib_dirs() -> list[str]:
@@ -162,18 +162,18 @@ def _create_ort_session(model_path: Path, device_index: int) -> Any:
     ]
     available = ort.get_available_providers()
     if "CUDAExecutionProvider" not in available:
-        typer.echo(
+        print(
             f"[WARN] CUDAExecutionProvider unavailable ({available}); using CPU.",
-            err=True,
+            file=sys.stderr,
         )
         providers = ["CPUExecutionProvider"]
     session = ort.InferenceSession(str(model_path), providers=providers)
     active = session.get_providers()
-    typer.echo(f"[INFO] ORT providers: {active}", err=True)
+    print(f"[INFO] ORT providers: {active}", file=sys.stderr)
     if "CUDAExecutionProvider" not in active:
-        typer.echo(
+        print(
             "[WARN] Running on CPU — GPU energy numbers will mostly reflect idle draw.",
-            err=True,
+            file=sys.stderr,
         )
     return session
 
@@ -331,33 +331,38 @@ def _summarize(
     )
 
 
-@app.command()
-def main(
-    model: Path = typer.Argument(..., exists=True, readable=True, help="Path to ONNX model"),
-    device: int = typer.Option(0, "--device", "-d", help="CUDA / NVML device index"),
-    warmup: int = typer.Option(10, "--warmup", "-w", help="Warmup iterations"),
-    runs: int = typer.Option(50, "--runs", "-n", help="Measured iterations"),
-    batch_size: int = typer.Option(1, "--batch-size", "-b", help="Batch size for synthetic inputs"),
-    output: Path | None = typer.Option(None, "--output", "-o", help="Optional JSON report path"),
-) -> None:
+@hydra.main(version_base="1.3", config_path="../../configs", config_name="config")
+def main(cfg: DictConfig) -> None:
     """Measure inference latency and GPU energy for an ONNX model using NVML."""
+    bench = cfg.benchmark
+    model = Path(to_absolute_path(str(bench.model)))
     if model.suffix.lower() != ".onnx":
-        raise typer.BadParameter("Only ONNX models are supported by the CLI for now.")
+        raise ValueError(f"Only ONNX models are supported for now, got: {model}")
+    if not model.is_file():
+        raise FileNotFoundError(f"Model not found: {model}")
+
+    np.random.seed(int(cfg.experiment.seed))
 
     result = benchmark_onnx(
         model_path=model,
-        device_index=device,
-        warmup=warmup,
-        runs=runs,
-        batch_size=batch_size,
+        device_index=int(bench.device),
+        warmup=int(bench.warmup),
+        runs=int(bench.runs),
+        # Optional; defaults to single-sample when omitted.
+        batch_size=int(OmegaConf.select(bench, "batch_size", default=1)),
     )
-    payload = result.to_dict()
-    typer.echo(json.dumps(payload, indent=2))
-    if output is not None:
+    payload = {
+        "experiment": OmegaConf.to_container(cfg.experiment, resolve=True),
+        **result.to_dict(),
+    }
+    print(json.dumps(payload, indent=2))
+
+    if bench.output is not None:
+        output = Path(to_absolute_path(str(bench.output)))
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, indent=2) + "\n")
-        typer.echo(f"Wrote {output}", err=True)
+        print(f"Wrote {output}", file=sys.stderr)
 
 
 if __name__ == "__main__":
-    app()
+    main()

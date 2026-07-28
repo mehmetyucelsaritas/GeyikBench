@@ -16,4 +16,4 @@ ENV PYTHONPATH=/workspace/src
 ENV PYTHONUNBUFFERED=1
 
 ENTRYPOINT ["python", "-u"]
-CMD ["src/geyikbench/bechmark.py"]
+CMD ["src/geyikbench/benchmark.py"]
