@@ -19,10 +19,14 @@ import numpy as np
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 from pynvml import (
+    NVML_CLOCK_SM,
+    NVML_TEMPERATURE_GPU,
     NVMLError,
+    nvmlDeviceGetClockInfo,
     nvmlDeviceGetHandleByIndex,
     nvmlDeviceGetName,
     nvmlDeviceGetPowerUsage,
+    nvmlDeviceGetTemperature,
     nvmlDeviceGetTotalEnergyConsumption,
     nvmlInit,
     nvmlShutdown,
@@ -80,8 +84,10 @@ class BenchmarkResult:
     device_name: str
     backend: str
     providers: list[str]
-    warmup: int
-    runs: int
+    warmup_s: float
+    runs_s: float
+    warmup_iters: int
+    runs_iters: int
     latency_ms_mean: float
     latency_ms_std: float
     latency_ms_p50: float
@@ -90,14 +96,22 @@ class BenchmarkResult:
     energy_mj_std: float
     energy_mj_total: float
     power_w_mean: float
+    temperature_c_mean: float
+    frequency_mhz_mean: float
     throughput_inf_per_s: float
+    # One sample per measured inference run (same length / order).
+    latency_ms: list[float]
+    energy_mj: list[float]
+    power_w: list[float]
+    temperature_c: list[float]
+    frequency_mhz: list[float]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 class NvmlEnergyMeter:
-    """Measure GPU energy with NVML total-energy counters (mJ)."""
+    """Measure GPU energy, power, temperature, and SM clocks via NVML."""
 
     def __init__(self, device_index: int = 0) -> None:
         nvmlInit()
@@ -112,6 +126,12 @@ class NvmlEnergyMeter:
 
     def power_w(self) -> float:
         return nvmlDeviceGetPowerUsage(self.handle) / 1000.0
+
+    def temperature_c(self) -> float:
+        return float(nvmlDeviceGetTemperature(self.handle, NVML_TEMPERATURE_GPU))
+
+    def frequency_mhz(self) -> float:
+        return float(nvmlDeviceGetClockInfo(self.handle, NVML_CLOCK_SM))
 
     def close(self) -> None:
         try:
@@ -189,11 +209,55 @@ def _cuda_synchronize(device_index: int) -> None:
         pass
 
 
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def _run_until(
+    step: Any,
+    *,
+    duration_s: float | None = None,
+    max_iters: int | None = None,
+) -> int:
+    """Call ``step`` until a time and/or iteration limit is hit. Returns iterations.
+
+    Stops at whichever configured limit is reached first. At least one of
+    ``duration_s`` / ``max_iters`` must be set.
+    """
+    if duration_s is None and max_iters is None:
+        raise ValueError("Provide duration_s and/or max_iters")
+    if duration_s is not None and duration_s < 0:
+        raise ValueError(f"duration_s must be >= 0, got {duration_s}")
+    if max_iters is not None and max_iters < 1:
+        raise ValueError(f"max_iters must be >= 1 when set, got {max_iters}")
+
+    n = 0
+    deadline = time.perf_counter() + duration_s if duration_s is not None else None
+    while True:
+        step()
+        n += 1
+        if max_iters is not None and n >= max_iters:
+            break
+        if deadline is not None and time.perf_counter() >= deadline:
+            break
+    return n
+
+
 def benchmark_onnx(
     model_path: Path,
     device_index: int = 0,
-    warmup: int = 10,
-    runs: int = 50,
+    warmup_s: float | None = 15.0,
+    runs_s: float | None = 30.0,
+    warmup_iters: int | None = None,
+    runs_iters: int | None = None,
     batch_size: int = 1,
 ) -> BenchmarkResult:
     meter = NvmlEnergyMeter(device_index)
@@ -203,28 +267,45 @@ def benchmark_onnx(
     sync = lambda: _cuda_synchronize(device_index)
 
     # Warmup so kernels / clocks settle before measurement.
-    for _ in range(warmup):
-        session.run(output_names, feeds)
+    warmup_iters_done = _run_until(
+        lambda: session.run(output_names, feeds),
+        duration_s=warmup_s,
+        max_iters=warmup_iters,
+    )
     sync()
 
     latencies_ms: list[float] = []
     energies_mj: list[float] = []
     powers_w: list[float] = []
+    temperatures_c: list[float] = []
+    frequencies_mhz: list[float] = []
 
-    for _ in range(runs):
+    def _measured_once() -> None:
         sync()
         e0 = meter.energy_mj()
         p0 = meter.power_w()
+        temp0 = meter.temperature_c()
+        freq0 = meter.frequency_mhz()
         t0 = time.perf_counter()
         session.run(output_names, feeds)
         sync()
         t1 = time.perf_counter()
         e1 = meter.energy_mj()
         p1 = meter.power_w()
+        temp1 = meter.temperature_c()
+        freq1 = meter.frequency_mhz()
 
         latencies_ms.append((t1 - t0) * 1000.0)
         energies_mj.append(float(e1 - e0))
         powers_w.append(0.5 * (p0 + p1))
+        temperatures_c.append(0.5 * (temp0 + temp1))
+        frequencies_mhz.append(0.5 * (freq0 + freq1))
+
+    runs_iters_done = _run_until(
+        _measured_once,
+        duration_s=runs_s,
+        max_iters=runs_iters,
+    )
 
     device_name = meter.device_name
     meter.close()
@@ -234,11 +315,15 @@ def benchmark_onnx(
         device_name=device_name,
         backend="onnxruntime",
         providers=list(session.get_providers()),
-        warmup=warmup,
-        runs=runs,
+        warmup_s=warmup_s,
+        runs_s=runs_s,
+        warmup_iters=warmup_iters_done,
+        runs_iters=runs_iters_done,
         latencies_ms=latencies_ms,
         energies_mj=energies_mj,
         powers_w=powers_w,
+        temperatures_c=temperatures_c,
+        frequencies_mhz=frequencies_mhz,
     )
 
 
@@ -247,28 +332,40 @@ def benchmark_callable(
     *,
     model_label: str,
     device_index: int = 0,
-    warmup: int = 10,
-    runs: int = 50,
+    warmup_s: float | None = 15.0,
+    runs_s: float | None = 30.0,
+    warmup_iters: int | None = None,
+    runs_iters: int | None = None,
     backend: str = "callable",
     synchronize: Any | None = None,
 ) -> BenchmarkResult:
     """Benchmark an arbitrary inference callable with NVML energy + wall time."""
     meter = NvmlEnergyMeter(device_index)
 
-    for _ in range(warmup):
+    def _warmup_once() -> None:
         run_once()
         if synchronize is not None:
             synchronize()
 
+    warmup_iters_done = _run_until(
+        _warmup_once,
+        duration_s=warmup_s,
+        max_iters=warmup_iters,
+    )
+
     latencies_ms: list[float] = []
     energies_mj: list[float] = []
     powers_w: list[float] = []
+    temperatures_c: list[float] = []
+    frequencies_mhz: list[float] = []
 
-    for _ in range(runs):
+    def _measured_once() -> None:
         if synchronize is not None:
             synchronize()
         e0 = meter.energy_mj()
         p0 = meter.power_w()
+        temp0 = meter.temperature_c()
+        freq0 = meter.frequency_mhz()
         t0 = time.perf_counter()
         run_once()
         if synchronize is not None:
@@ -276,10 +373,20 @@ def benchmark_callable(
         t1 = time.perf_counter()
         e1 = meter.energy_mj()
         p1 = meter.power_w()
+        temp1 = meter.temperature_c()
+        freq1 = meter.frequency_mhz()
 
         latencies_ms.append((t1 - t0) * 1000.0)
         energies_mj.append(float(e1 - e0))
         powers_w.append(0.5 * (p0 + p1))
+        temperatures_c.append(0.5 * (temp0 + temp1))
+        frequencies_mhz.append(0.5 * (freq0 + freq1))
+
+    runs_iters_done = _run_until(
+        _measured_once,
+        duration_s=runs_s,
+        max_iters=runs_iters,
+    )
 
     device_name = meter.device_name
     meter.close()
@@ -289,11 +396,15 @@ def benchmark_callable(
         device_name=device_name,
         backend=backend,
         providers=[],
-        warmup=warmup,
-        runs=runs,
+        warmup_s=warmup_s,
+        runs_s=runs_s,
+        warmup_iters=warmup_iters_done,
+        runs_iters=runs_iters_done,
         latencies_ms=latencies_ms,
         energies_mj=energies_mj,
         powers_w=powers_w,
+        temperatures_c=temperatures_c,
+        frequencies_mhz=frequencies_mhz,
     )
 
 
@@ -304,11 +415,15 @@ def _summarize(
     device_name: str,
     backend: str,
     providers: list[str],
-    warmup: int,
-    runs: int,
+    warmup_s: float | None,
+    runs_s: float | None,
+    warmup_iters: int,
+    runs_iters: int,
     latencies_ms: list[float],
     energies_mj: list[float],
     powers_w: list[float],
+    temperatures_c: list[float],
+    frequencies_mhz: list[float],
 ) -> BenchmarkResult:
     mean_latency = statistics.fmean(latencies_ms)
     return BenchmarkResult(
@@ -317,17 +432,26 @@ def _summarize(
         device_name=device_name,
         backend=backend,
         providers=providers,
-        warmup=warmup,
-        runs=runs,
+        warmup_s=warmup_s if warmup_s is not None else float("nan"),
+        runs_s=runs_s if runs_s is not None else float("nan"),
+        warmup_iters=warmup_iters,
+        runs_iters=runs_iters,
         latency_ms_mean=mean_latency,
         latency_ms_std=statistics.pstdev(latencies_ms) if len(latencies_ms) > 1 else 0.0,
         latency_ms_p50=_percentile(latencies_ms, 50),
         latency_ms_p95=_percentile(latencies_ms, 95),
-        energy_mj_mean=statistics.fmean(energies_mj),
-        energy_mj_std=statistics.pstdev(energies_mj) if len(energies_mj) > 1 else 0.0,
+        energy_mj_mean=statistics.fmean(e for e in energies_mj if e > 0) if any(e > 0 for e in energies_mj) else 0.0,
+        energy_mj_std=statistics.pstdev(e for e in energies_mj if e > 0) if sum(1 for e in energies_mj if e > 0) > 1 else 0.0,
         energy_mj_total=float(sum(energies_mj)),
         power_w_mean=statistics.fmean(powers_w),
+        temperature_c_mean=statistics.fmean(temperatures_c),
+        frequency_mhz_mean=statistics.fmean(frequencies_mhz),
         throughput_inf_per_s=(1000.0 / mean_latency) if mean_latency > 0 else float("nan"),
+        latency_ms=latencies_ms,
+        energy_mj=energies_mj,
+        power_w=powers_w,
+        temperature_c=temperatures_c,
+        frequency_mhz=frequencies_mhz,
     )
 
 
@@ -346,8 +470,10 @@ def main(cfg: DictConfig) -> None:
     result = benchmark_onnx(
         model_path=model,
         device_index=int(bench.device),
-        warmup=int(bench.warmup),
-        runs=int(bench.runs),
+        warmup_s=_optional_float(OmegaConf.select(bench, "warmup_s")),
+        runs_s=_optional_float(OmegaConf.select(bench, "runs_s")),
+        warmup_iters=_optional_int(OmegaConf.select(bench, "warmup_iters")),
+        runs_iters=_optional_int(OmegaConf.select(bench, "runs_iters")),
         # Optional; defaults to single-sample when omitted.
         batch_size=int(OmegaConf.select(bench, "batch_size", default=1)),
     )
@@ -362,6 +488,19 @@ def main(cfg: DictConfig) -> None:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, indent=2) + "\n")
         print(f"Wrote {output}", file=sys.stderr)
+
+        # Log to W&B from within this process so the wandb/ folder is written
+        # into the same Hydra output dir (which is writable by the current process).
+        if OmegaConf.select(cfg, "wandb.enabled", default=True):
+            try:
+                from geyikbench.visualize import log_result
+                log_result(
+                    result_path=output,
+                    project=OmegaConf.select(cfg, "wandb.project", default="geyikbench"),
+                    wandb_dir=output.parent,
+                )
+            except Exception as exc:  # never crash the benchmark over W&B
+                print(f"[WARN] W&B logging failed: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

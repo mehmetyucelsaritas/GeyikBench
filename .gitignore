@@ -179,4 +179,4 @@ models/LOP7/*
 src/geyikbench/to_sadl.py
 
 # Hydra experiment outputs
-outputs/
+outputs/*
