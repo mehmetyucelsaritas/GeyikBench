@@ -1,4 +1,4 @@
-"""Benchmark ONNX / PyTorch model inference time and GPU energy via NVIDIA NVML."""
+"""Benchmark ONNX / PyTorch model inference time and GPU power via NVIDIA NVML."""
 
 from __future__ import annotations
 
@@ -19,7 +19,10 @@ import numpy as np
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 from pynvml import (
+    NVML_CLOCK_GRAPHICS,
+    NVML_CLOCK_MEM,
     NVML_CLOCK_SM,
+    NVML_CLOCK_VIDEO,
     NVML_TEMPERATURE_GPU,
     NVMLError,
     nvmlDeviceGetClockInfo,
@@ -27,7 +30,6 @@ from pynvml import (
     nvmlDeviceGetName,
     nvmlDeviceGetPowerUsage,
     nvmlDeviceGetTemperature,
-    nvmlDeviceGetTotalEnergyConsumption,
     nvmlInit,
     nvmlShutdown,
 )
@@ -98,20 +100,29 @@ class BenchmarkResult:
     power_w_mean: float
     temperature_c_mean: float
     frequency_mhz_mean: float
+    frequency_mem_mhz_mean: float
+    frequency_graphics_mhz_mean: float
+    frequency_video_mhz_mean: float
     throughput_inf_per_s: float
+    # Samples dropped from aggregates (first ~1s of measured latency).
+    steady_skip_iters: int
+    steady_iters: int
     # One sample per measured inference run (same length / order).
     latency_ms: list[float]
     energy_mj: list[float]
     power_w: list[float]
     temperature_c: list[float]
     frequency_mhz: list[float]
+    frequency_mem_mhz: list[float]
+    frequency_graphics_mhz: list[float]
+    frequency_video_mhz: list[float]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 class NvmlEnergyMeter:
-    """Measure GPU energy, power, temperature, and SM clocks via NVML."""
+    """Measure GPU power, temperature, and clocks via NVML."""
 
     def __init__(self, device_index: int = 0) -> None:
         nvmlInit()
@@ -121,9 +132,6 @@ class NvmlEnergyMeter:
         if isinstance(self.device_name, bytes):
             self.device_name = self.device_name.decode("utf-8")
 
-    def energy_mj(self) -> int:
-        return int(nvmlDeviceGetTotalEnergyConsumption(self.handle))
-
     def power_w(self) -> float:
         return nvmlDeviceGetPowerUsage(self.handle) / 1000.0
 
@@ -132,6 +140,15 @@ class NvmlEnergyMeter:
 
     def frequency_mhz(self) -> float:
         return float(nvmlDeviceGetClockInfo(self.handle, NVML_CLOCK_SM))
+
+    def frequency_mem_mhz(self) -> float:
+        return float(nvmlDeviceGetClockInfo(self.handle, NVML_CLOCK_MEM))
+
+    def frequency_graphics_mhz(self) -> float:
+        return float(nvmlDeviceGetClockInfo(self.handle, NVML_CLOCK_GRAPHICS))
+
+    def frequency_video_mhz(self) -> float:
+        return float(nvmlDeviceGetClockInfo(self.handle, NVML_CLOCK_VIDEO))
 
     def close(self) -> None:
         try:
@@ -146,6 +163,26 @@ def _percentile(values: list[float], q: float) -> float:
     ordered = sorted(values)
     idx = min(len(ordered) - 1, max(0, int(round((q / 100.0) * (len(ordered) - 1)))))
     return ordered[idx]
+
+
+# Drop the first second of measured samples from aggregate metrics. NVML power
+# readings lag after the warmup→measure transition; raw series are kept intact.
+_METRIC_SKIP_S = 1.0
+
+
+def _steady_start_index(latencies_ms: list[float], skip_s: float = _METRIC_SKIP_S) -> int:
+    """Index of the first sample after ``skip_s`` seconds of measured latency."""
+    if skip_s <= 0.0 or not latencies_ms:
+        return 0
+    budget_ms = skip_s * 1000.0
+    cumulative_ms = 0.0
+    for i, latency_ms in enumerate(latencies_ms):
+        cumulative_ms += latency_ms
+        if cumulative_ms >= budget_ms:
+            start = i + 1
+            # If the whole run is shorter than the skip window, keep everything.
+            return start if start < len(latencies_ms) else 0
+    return 0
 
 
 def _make_onnx_feeds(
@@ -192,7 +229,7 @@ def _create_ort_session(model_path: Path, device_index: int) -> Any:
     print(f"[INFO] ORT providers: {active}", file=sys.stderr)
     if "CUDAExecutionProvider" not in active:
         print(
-            "[WARN] Running on CPU — GPU energy numbers will mostly reflect idle draw.",
+            "[WARN] Running on CPU — GPU power numbers will mostly reflect idle draw.",
             file=sys.stderr,
         )
     return session
@@ -275,31 +312,43 @@ def benchmark_onnx(
     sync()
 
     latencies_ms: list[float] = []
-    energies_mj: list[float] = []
     powers_w: list[float] = []
     temperatures_c: list[float] = []
     frequencies_mhz: list[float] = []
+    frequencies_mem_mhz: list[float] = []
+    frequencies_graphics_mhz: list[float] = []
+    frequencies_video_mhz: list[float] = []
 
     def _measured_once() -> None:
+        # Independent paths per sample:
+        #   latency  -> host timer around sync'd inference
+        #   power    -> NVML instantaneous power (avg of before/after)
+        #   energy   -> derived later as power * latency (not NVML counter)
         sync()
-        e0 = meter.energy_mj()
         p0 = meter.power_w()
         temp0 = meter.temperature_c()
-        freq0 = meter.frequency_mhz()
+        freq_sm0 = meter.frequency_mhz()
+        freq_mem0 = meter.frequency_mem_mhz()
+        freq_graphics0 = meter.frequency_graphics_mhz()
+        freq_video0 = meter.frequency_video_mhz()
         t0 = time.perf_counter()
         session.run(output_names, feeds)
         sync()
         t1 = time.perf_counter()
-        e1 = meter.energy_mj()
         p1 = meter.power_w()
         temp1 = meter.temperature_c()
-        freq1 = meter.frequency_mhz()
+        freq_sm1 = meter.frequency_mhz()
+        freq_mem1 = meter.frequency_mem_mhz()
+        freq_graphics1 = meter.frequency_graphics_mhz()
+        freq_video1 = meter.frequency_video_mhz()
 
         latencies_ms.append((t1 - t0) * 1000.0)
-        energies_mj.append(float(e1 - e0))
         powers_w.append(0.5 * (p0 + p1))
         temperatures_c.append(0.5 * (temp0 + temp1))
-        frequencies_mhz.append(0.5 * (freq0 + freq1))
+        frequencies_mhz.append(0.5 * (freq_sm0 + freq_sm1))
+        frequencies_mem_mhz.append(0.5 * (freq_mem0 + freq_mem1))
+        frequencies_graphics_mhz.append(0.5 * (freq_graphics0 + freq_graphics1))
+        frequencies_video_mhz.append(0.5 * (freq_video0 + freq_video1))
 
     runs_iters_done = _run_until(
         _measured_once,
@@ -320,10 +369,12 @@ def benchmark_onnx(
         warmup_iters=warmup_iters_done,
         runs_iters=runs_iters_done,
         latencies_ms=latencies_ms,
-        energies_mj=energies_mj,
         powers_w=powers_w,
         temperatures_c=temperatures_c,
         frequencies_mhz=frequencies_mhz,
+        frequencies_mem_mhz=frequencies_mem_mhz,
+        frequencies_graphics_mhz=frequencies_graphics_mhz,
+        frequencies_video_mhz=frequencies_video_mhz,
     )
 
 
@@ -339,7 +390,7 @@ def benchmark_callable(
     backend: str = "callable",
     synchronize: Any | None = None,
 ) -> BenchmarkResult:
-    """Benchmark an arbitrary inference callable with NVML energy + wall time."""
+    """Benchmark an arbitrary inference callable with NVML power + wall time."""
     meter = NvmlEnergyMeter(device_index)
 
     def _warmup_once() -> None:
@@ -354,33 +405,41 @@ def benchmark_callable(
     )
 
     latencies_ms: list[float] = []
-    energies_mj: list[float] = []
     powers_w: list[float] = []
     temperatures_c: list[float] = []
     frequencies_mhz: list[float] = []
+    frequencies_mem_mhz: list[float] = []
+    frequencies_graphics_mhz: list[float] = []
+    frequencies_video_mhz: list[float] = []
 
     def _measured_once() -> None:
         if synchronize is not None:
             synchronize()
-        e0 = meter.energy_mj()
         p0 = meter.power_w()
         temp0 = meter.temperature_c()
-        freq0 = meter.frequency_mhz()
+        freq_sm0 = meter.frequency_mhz()
+        freq_mem0 = meter.frequency_mem_mhz()
+        freq_graphics0 = meter.frequency_graphics_mhz()
+        freq_video0 = meter.frequency_video_mhz()
         t0 = time.perf_counter()
         run_once()
         if synchronize is not None:
             synchronize()
         t1 = time.perf_counter()
-        e1 = meter.energy_mj()
         p1 = meter.power_w()
         temp1 = meter.temperature_c()
-        freq1 = meter.frequency_mhz()
+        freq_sm1 = meter.frequency_mhz()
+        freq_mem1 = meter.frequency_mem_mhz()
+        freq_graphics1 = meter.frequency_graphics_mhz()
+        freq_video1 = meter.frequency_video_mhz()
 
         latencies_ms.append((t1 - t0) * 1000.0)
-        energies_mj.append(float(e1 - e0))
         powers_w.append(0.5 * (p0 + p1))
         temperatures_c.append(0.5 * (temp0 + temp1))
-        frequencies_mhz.append(0.5 * (freq0 + freq1))
+        frequencies_mhz.append(0.5 * (freq_sm0 + freq_sm1))
+        frequencies_mem_mhz.append(0.5 * (freq_mem0 + freq_mem1))
+        frequencies_graphics_mhz.append(0.5 * (freq_graphics0 + freq_graphics1))
+        frequencies_video_mhz.append(0.5 * (freq_video0 + freq_video1))
 
     runs_iters_done = _run_until(
         _measured_once,
@@ -401,10 +460,12 @@ def benchmark_callable(
         warmup_iters=warmup_iters_done,
         runs_iters=runs_iters_done,
         latencies_ms=latencies_ms,
-        energies_mj=energies_mj,
         powers_w=powers_w,
         temperatures_c=temperatures_c,
         frequencies_mhz=frequencies_mhz,
+        frequencies_mem_mhz=frequencies_mem_mhz,
+        frequencies_graphics_mhz=frequencies_graphics_mhz,
+        frequencies_video_mhz=frequencies_video_mhz,
     )
 
 
@@ -420,12 +481,42 @@ def _summarize(
     warmup_iters: int,
     runs_iters: int,
     latencies_ms: list[float],
-    energies_mj: list[float],
     powers_w: list[float],
     temperatures_c: list[float],
     frequencies_mhz: list[float],
+    frequencies_mem_mhz: list[float],
+    frequencies_graphics_mhz: list[float],
+    frequencies_video_mhz: list[float],
 ) -> BenchmarkResult:
-    mean_latency = statistics.fmean(latencies_ms)
+    start = _steady_start_index(latencies_ms)
+    steady_latencies = latencies_ms[start:]
+    steady_powers = powers_w[start:]
+    steady_temps = temperatures_c[start:]
+    steady_freqs = frequencies_mhz[start:]
+    steady_freqs_mem = frequencies_mem_mhz[start:]
+    steady_freqs_graphics = frequencies_graphics_mhz[start:]
+    steady_freqs_video = frequencies_video_mhz[start:]
+    steady_iters = len(steady_latencies)
+
+    mean_latency = statistics.fmean(steady_latencies) if steady_latencies else float("nan")
+    power_mean = statistics.fmean(steady_powers) if steady_powers else float("nan")
+
+    # Energy is not read from NVML. W * ms == mJ.
+    # Summary: energy_mj_mean = latency_ms_mean * power_w_mean
+    # Per-sample series: energy_mj[i] = latency_ms[i] * power_w[i]
+    energies_mj = [lat * pwr for lat, pwr in zip(latencies_ms, powers_w)]
+    steady_energies = energies_mj[start:]
+    if (
+        mean_latency == mean_latency
+        and power_mean == power_mean
+        and mean_latency > 0
+        and power_mean > 0
+    ):
+        energy_mean = mean_latency * power_mean
+    else:
+        energy_mean = 0.0
+    energy_total = energy_mean * steady_iters if steady_iters > 0 else 0.0
+
     return BenchmarkResult(
         model=model,
         device_index=device_index,
@@ -437,27 +528,39 @@ def _summarize(
         warmup_iters=warmup_iters,
         runs_iters=runs_iters,
         latency_ms_mean=mean_latency,
-        latency_ms_std=statistics.pstdev(latencies_ms) if len(latencies_ms) > 1 else 0.0,
-        latency_ms_p50=_percentile(latencies_ms, 50),
-        latency_ms_p95=_percentile(latencies_ms, 95),
-        energy_mj_mean=statistics.fmean(e for e in energies_mj if e > 0) if any(e > 0 for e in energies_mj) else 0.0,
-        energy_mj_std=statistics.pstdev(e for e in energies_mj if e > 0) if sum(1 for e in energies_mj if e > 0) > 1 else 0.0,
-        energy_mj_total=float(sum(energies_mj)),
-        power_w_mean=statistics.fmean(powers_w),
-        temperature_c_mean=statistics.fmean(temperatures_c),
-        frequency_mhz_mean=statistics.fmean(frequencies_mhz),
+        latency_ms_std=statistics.pstdev(steady_latencies) if len(steady_latencies) > 1 else 0.0,
+        latency_ms_p50=_percentile(steady_latencies, 50),
+        latency_ms_p95=_percentile(steady_latencies, 95),
+        energy_mj_mean=energy_mean,
+        energy_mj_std=statistics.pstdev(steady_energies) if len(steady_energies) > 1 else 0.0,
+        energy_mj_total=energy_total,
+        power_w_mean=power_mean,
+        temperature_c_mean=statistics.fmean(steady_temps) if steady_temps else float("nan"),
+        frequency_mhz_mean=statistics.fmean(steady_freqs) if steady_freqs else float("nan"),
+        frequency_mem_mhz_mean=statistics.fmean(steady_freqs_mem) if steady_freqs_mem else float("nan"),
+        frequency_graphics_mhz_mean=(
+            statistics.fmean(steady_freqs_graphics) if steady_freqs_graphics else float("nan")
+        ),
+        frequency_video_mhz_mean=(
+            statistics.fmean(steady_freqs_video) if steady_freqs_video else float("nan")
+        ),
         throughput_inf_per_s=(1000.0 / mean_latency) if mean_latency > 0 else float("nan"),
+        steady_skip_iters=start,
+        steady_iters=steady_iters,
         latency_ms=latencies_ms,
         energy_mj=energies_mj,
         power_w=powers_w,
         temperature_c=temperatures_c,
         frequency_mhz=frequencies_mhz,
+        frequency_mem_mhz=frequencies_mem_mhz,
+        frequency_graphics_mhz=frequencies_graphics_mhz,
+        frequency_video_mhz=frequencies_video_mhz,
     )
 
 
 @hydra.main(version_base="1.3", config_path="../../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
-    """Measure inference latency and GPU energy for an ONNX model using NVML."""
+    """Measure inference latency and GPU power for an ONNX model using NVML."""
     bench = cfg.benchmark
     model = Path(to_absolute_path(str(bench.model)))
     if model.suffix.lower() != ".onnx":
