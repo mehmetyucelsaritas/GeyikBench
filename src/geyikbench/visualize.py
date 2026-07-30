@@ -74,75 +74,8 @@ def _sample_vs_metric_figure(
     return fig
 
 
-def log_result(
-    result_path: str | Path,
-    project: str = "geyikbench",
-    wandb_dir: str | Path | None = None,
-) -> None:
-    """Load a result.json and store summary metrics + plots in W&B.
-
-    Scalars go to ``run.summary`` only (no ``wandb.log`` of scalars), so W&B
-    does not create a chart panel per metric. Per-sample distributions are
-    logged as matplotlib histogram and sample-vs-metric images.
-
-    W&B local run files are written into *wandb_dir* (defaults to the same
-    directory as result.json so they live alongside the Hydra outputs).
-
-    Args:
-        result_path: Path to result.json (or its parent directory).
-        project:     W&B project name.
-        wandb_dir:   Directory where the ``wandb/`` subfolder will be created.
-                     Defaults to ``result_path.parent``.
-    """
-    # Load .env only when available (not present inside Docker; vars are injected via --env-file)
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except ImportError:
-        pass
-
-    result_path = Path(result_path)
-    if result_path.is_dir():
-        result_path = result_path / "result.json"
-
-    output_dir = result_path.parent  # e.g. outputs/lop7_baseline/2026-07-29_09-04-41/
-
-    if wandb_dir is None:
-        wandb_dir = output_dir
-    wandb_dir = Path(wandb_dir)
-    wandb_dir.mkdir(parents=True, exist_ok=True)
-
-    with open(result_path) as f:
-        data = json.load(f)
-
-    experiment = data.get("experiment", {})
-    run_name = experiment.get("name", output_dir.parent.name)
-    timestamp = output_dir.name  # e.g. "2026-07-29_09-04-41"
-
-    config = {
-        "experiment": experiment,
-        "model": data["model"],
-        "device_index": data["device_index"],
-        "device_name": data["device_name"],
-        "backend": data["backend"],
-        "providers": data["providers"],
-        "warmup_s": data["warmup_s"],
-        "runs_s": data["runs_s"],
-        "warmup_iters": data["warmup_iters"],
-        "runs_iters": data["runs_iters"],
-        "result_path": str(result_path.resolve()),
-    }
-
-    run = wandb.init(
-        project=project,
-        name=f"{run_name}_{timestamp}",
-        config=config,
-        dir=str(wandb_dir),
-    )
-
-    # Derive std for metrics that only have mean stored at the top level.
-    # Use `.get(...)` so older `result.json` files (without the new clock domains)
-    # can still be visualized. Match benchmark.py: skip first 1s of measured time.
+def summary_metrics_from_result(data: dict[str, Any]) -> dict[str, Any]:
+    """Build the scalar summary dict used by individual benchmark W&B runs."""
     latencies = data.get("latency_ms", [])
     powers = data.get("power_w", [])
     temps = data.get("temperature_c", [])
@@ -158,7 +91,7 @@ def log_result(
     steady_freqs_graphics = freqs_graphics[start:]
     steady_freqs_video = freqs_video[start:]
 
-    summary = {
+    return {
         "latency_ms/mean": data["latency_ms_mean"],
         "latency_ms/std": data["latency_ms_std"],
         "latency_ms/p50": data["latency_ms_p50"],
@@ -189,14 +122,39 @@ def log_result(
         "steady_iters": data.get("steady_iters", max(0, len(latencies) - start)),
     }
 
-    # Summary-only: do not wandb.log() scalars — that creates one empty
-    # single-point chart panel per metric. Summary metrics still show up in
-    # the run overview and the project runs table for cross-run comparison.
+
+def populate_wandb_run(
+    run: Any,
+    data: dict[str, Any],
+    *,
+    output_dir: str | Path,
+    run_name: str,
+    extra_summary: dict[str, Any] | None = None,
+) -> None:
+    """Attach benchmark summary metrics, sample table, and plot images to an open run.
+
+    Uses the same ``latency_ms/mean``-style keys and histogram/series media as
+    individual ``benchmark.py`` runs, so project/sweep tables stay comparable.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = summary_metrics_from_result(data)
+    if extra_summary:
+        summary.update(extra_summary)
+    # Summary-only scalars: avoid wandb.log() of scalars (empty chart panels).
     run.summary.update(summary)
 
-    # Per-sample table (one media panel; useful for inspecting distributions).
+    latencies = data.get("latency_ms", [])
+    powers = data.get("power_w", [])
+    temps = data.get("temperature_c", [])
+    freqs_sm = data.get("frequency_mhz", [])
+    freqs_mem = data.get("frequency_mem_mhz", [])
+    freqs_graphics = data.get("frequency_graphics_mhz", [])
+    freqs_video = data.get("frequency_video_mhz", [])
     energies = data.get("energy_mj", [])
     n = len(latencies)
+
     table = wandb.Table(
         columns=[
             "step",
@@ -211,26 +169,19 @@ def log_result(
         ],
     )
     for i in range(n):
-        freq_sm_i = freqs_sm[i] if i < len(freqs_sm) else float("nan")
-        freq_mem_i = freqs_mem[i] if i < len(freqs_mem) else float("nan")
-        freq_graphics_i = freqs_graphics[i] if i < len(freqs_graphics) else float("nan")
-        freq_video_i = freqs_video[i] if i < len(freqs_video) else float("nan")
         table.add_data(
             i,
             latencies[i],
             energies[i] if i < len(energies) else float("nan"),
             powers[i] if i < len(powers) else float("nan"),
             temps[i] if i < len(temps) else float("nan"),
-            freq_sm_i,
-            freq_mem_i,
-            freq_graphics_i,
-            freq_video_i,
+            freqs_sm[i] if i < len(freqs_sm) else float("nan"),
+            freqs_mem[i] if i < len(freqs_mem) else float("nan"),
+            freqs_graphics[i] if i < len(freqs_graphics) else float("nan"),
+            freqs_video[i] if i < len(freqs_video) else float("nan"),
         )
     run.summary["samples"] = table
 
-    # Matplotlib plots as images (not W&B Histogram objects / scalar charts).
-    # energy_mj is derived as power_w * latency_ms (W*ms == mJ), not NVML energy.
-    # (key, series_for_sample_plot, series_for_histogram, axis_label)
     plot_specs = [
         ("latency_ms", latencies, latencies, "Latency (ms)"),
         ("energy_mj", energies, energies, "Energy (mJ)"),
@@ -271,16 +222,83 @@ def log_result(
             plt.close(series_fig)
 
     if media_images:
-        # One media log step — images appear under Media, not as scalar charts.
         wandb.log(media_images)
         run.summary.update(media_images)
+        print(f"[visualize] Histogram PNGs: {hist_dir}", flush=True)
+        print(f"[visualize] Series PNGs: {series_dir}", flush=True)
+
+
+def log_result(
+    result_path: str | Path,
+    project: str = "geyikbench",
+    wandb_dir: str | Path | None = None,
+) -> None:
+    """Load a result.json and store summary metrics + plots in W&B.
+
+    Scalars go to ``run.summary`` only (no ``wandb.log`` of scalars), so W&B
+    does not create a chart panel per metric. Per-sample distributions are
+    logged as matplotlib histogram and sample-vs-metric images.
+
+    W&B local run files are written into *wandb_dir* (defaults to the same
+    directory as result.json so they live alongside the Hydra outputs).
+
+    Args:
+        result_path: Path to result.json (or its parent directory).
+        project:     W&B project name.
+        wandb_dir:   Directory where the ``wandb/`` subfolder will be created.
+                     Defaults to ``result_path.parent``.
+    """
+    # Load .env only when available (not present inside Docker; vars are injected via --env-file)
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+
+    result_path = Path(result_path)
+    if result_path.is_dir():
+        result_path = result_path / "result.json"
+
+    output_dir = result_path.parent  # e.g. outputs/2026-07-29_09-04-41_lop7/
+
+    if wandb_dir is None:
+        wandb_dir = output_dir
+    wandb_dir = Path(wandb_dir)
+    wandb_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(result_path) as f:
+        data = json.load(f)
+
+    experiment = data.get("experiment", {})
+    run_name = experiment.get("name", output_dir.parent.name)
+    timestamp = output_dir.name  # e.g. "2026-07-29_09-04-41"
+
+    config = {
+        "experiment": experiment,
+        "model": data["model"],
+        "device_index": data["device_index"],
+        "device_name": data["device_name"],
+        "backend": data["backend"],
+        "providers": data["providers"],
+        "warmup_s": data["warmup_s"],
+        "runs_s": data["runs_s"],
+        "warmup_iters": data["warmup_iters"],
+        "runs_iters": data["runs_iters"],
+        "result_path": str(result_path.resolve()),
+    }
+
+    run = wandb.init(
+        project=project,
+        name=f"{run_name}_{timestamp}",
+        config=config,
+        dir=str(wandb_dir),
+    )
+
+    populate_wandb_run(run, data, output_dir=output_dir, run_name=run_name)
 
     wandb.finish()
     print(f"[visualize] W&B run '{run.name}' logged to project '{project}'.", flush=True)
     print(f"[visualize] Local W&B files: {wandb_dir / 'wandb'}", flush=True)
-    if media_images:
-        print(f"[visualize] Histogram PNGs: {hist_dir}", flush=True)
-        print(f"[visualize] Series PNGs: {series_dir}", flush=True)
 
 
 def main() -> None:
