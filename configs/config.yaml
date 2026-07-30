@@ -8,4 +8,4 @@ experiment:
 
 hydra:
   run:
-    dir: outputs/${experiment.name}/${now:%Y-%m-%d_%H-%M-%S}
+    dir: outputs/${now:%Y-%m-%d_%H-%M-%S}_${experiment.name}
