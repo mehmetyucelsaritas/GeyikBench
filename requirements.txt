@@ -1,7 +1,7 @@
 torch==2.6.0
 nvidia-ml-py==13.610.43
 numpy==2.5.1
-onnxruntime-gpu==1.20.1
+onnxruntime-gpu==1.20.2
 onnx==1.22.0
 typer>=0.15.2
 invoke==3.0.3
