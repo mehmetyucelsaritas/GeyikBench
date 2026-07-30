@@ -15,9 +15,6 @@ POWER_W="${POWER_W:-}" # optional, e.g. 250
 RESET="${RESET:-0}"
 GPU_IDS="${GPU_IDS:-all}"
 
-echo "GPUs:"
-nvidia-smi -L
-
 gpu_args=()
 if [[ "${GPU_IDS}" != "all" ]]; then
   # nvidia-smi -i accepts comma-separated indices.
@@ -26,6 +23,10 @@ if [[ "${GPU_IDS}" != "all" ]]; then
 else
   echo "Target GPU(s): all"
 fi
+
+# List only the GPUs we will configure (nvidia-smi -L always prints every card).
+echo "GPUs:"
+nvidia-smi "${gpu_args[@]}" --query-gpu=index,name,uuid --format=csv
 
 if [[ "${RESET}" == "1" ]]; then
   echo "Resetting application clocks and power limits to defaults..."
