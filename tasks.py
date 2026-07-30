@@ -243,19 +243,20 @@ def wandb_sweep_timing_agent(
     running.
 
     ``devices=all`` launches one agent per visible GPU. By default pins equal
-    application clocks once before agents start (idle GPUs still downclock).
+    application clocks on those same GPUs only (unused cards stay unlocked).
 
     Example::
 
         invoke wandb-sweep-timing-run
         invoke wandb-sweep-timing-agent --sweep-id=new
+        invoke wandb-sweep-timing-agent --sweep-id=new --devices=0,1,2
         invoke wandb-sweep-timing-agent --sweep-id=entity/project/abc123
     """
     import subprocess
     from pathlib import Path
 
     if lock_clocks:
-        docker_lock_gpu_clocks(ctx)
+        docker_lock_gpu_clocks(ctx, devices=devices)
 
     if not sweep_id or sweep_id.strip().lower() in {"new", "create", "fresh"}:
         sweep_id = _create_wandb_sweep(config=config, project=project, entity=entity)
