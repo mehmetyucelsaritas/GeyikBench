@@ -121,16 +121,49 @@ class BenchmarkResult:
         return asdict(self)
 
 
+def _resolve_nvml_device_index(cuda_device_index: int) -> int:
+    """Map a CUDA ordinal to the NVML/physical GPU index.
+
+    ``CUDA_VISIBLE_DEVICES`` remaps CUDA indices but NVML still uses host GPU
+    numbers. Multi-agent sweeps set ``CUDA_VISIBLE_DEVICES=<gpu>`` and
+    ``device=0``; without this mapping, power/clocks are always read from GPU 0.
+    """
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if not visible:
+        return cuda_device_index
+    parts = [p.strip() for p in visible.split(",") if p.strip() != ""]
+    if cuda_device_index < 0 or cuda_device_index >= len(parts):
+        raise ValueError(
+            f"CUDA device index {cuda_device_index} is out of range for "
+            f"CUDA_VISIBLE_DEVICES={visible!r}"
+        )
+    token = parts[cuda_device_index]
+    if not token.isdigit():
+        raise ValueError(
+            f"Unsupported CUDA_VISIBLE_DEVICES entry {token!r}; "
+            "expected a numeric GPU index"
+        )
+    return int(token)
+
+
 class NvmlEnergyMeter:
     """Measure GPU power, temperature, and clocks via NVML."""
 
     def __init__(self, device_index: int = 0) -> None:
         nvmlInit()
-        self.device_index = device_index
-        self.handle = nvmlDeviceGetHandleByIndex(device_index)
+        # CUDA ordinal (respects CUDA_VISIBLE_DEVICES) vs NVML physical index.
+        self.cuda_device_index = device_index
+        self.device_index = _resolve_nvml_device_index(device_index)
+        self.handle = nvmlDeviceGetHandleByIndex(self.device_index)
         self.device_name = nvmlDeviceGetName(self.handle)
         if isinstance(self.device_name, bytes):
             self.device_name = self.device_name.decode("utf-8")
+        if self.device_index != self.cuda_device_index:
+            print(
+                f"[INFO] NVML physical GPU {self.device_index} "
+                f"(CUDA ordinal {self.cuda_device_index})",
+                file=sys.stderr,
+            )
 
     def power_w(self) -> float:
         return nvmlDeviceGetPowerUsage(self.handle) / 1000.0
@@ -357,10 +390,12 @@ def benchmark_onnx(
     )
 
     device_name = meter.device_name
+    nvml_index = meter.device_index
     meter.close()
     return _summarize(
         model=str(model_path),
-        device_index=device_index,
+        # Report the physical GPU that NVML metered (after CUDA_VISIBLE_DEVICES).
+        device_index=nvml_index,
         device_name=device_name,
         backend="onnxruntime",
         providers=list(session.get_providers()),
@@ -448,10 +483,11 @@ def benchmark_callable(
     )
 
     device_name = meter.device_name
+    nvml_index = meter.device_index
     meter.close()
     return _summarize(
         model=model_label,
-        device_index=device_index,
+        device_index=nvml_index,
         device_name=device_name,
         backend=backend,
         providers=[],
@@ -584,7 +620,19 @@ def main(cfg: DictConfig) -> None:
         "experiment": OmegaConf.to_container(cfg.experiment, resolve=True),
         **result.to_dict(),
     }
-    print(json.dumps(payload, indent=2))
+    # Do not print per-sample series (latency/power/freq arrays) — large and slow.
+    _series_keys = {
+        "latency_ms",
+        "energy_mj",
+        "power_w",
+        "temperature_c",
+        "frequency_mhz",
+        "frequency_mem_mhz",
+        "frequency_graphics_mhz",
+        "frequency_video_mhz",
+    }
+    summary = {k: v for k, v in payload.items() if k not in _series_keys}
+    print(json.dumps(summary, indent=2))
 
     if bench.output is not None:
         output = Path(to_absolute_path(str(bench.output)))
