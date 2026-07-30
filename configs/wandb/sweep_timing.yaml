@@ -1,0 +1,34 @@
+# W&B Sweep: find warmup_s / runs_s with best latency repeatability.
+# Create:  invoke wandb-sweep-timing
+# Agents:  invoke wandb-sweep-timing-agent --sweep-id=<id>
+#
+# Metric to minimize: cross-repeat CV of mean latency (latency_ms_mean_cv).
+program: src/geyikbench/wandb_sweep_timing.py
+method: grid
+metric:
+  name: latency_ms_mean_cv
+  goal: minimize
+# Do not append ${args} — hyperparameters are read via wandb.config only.
+command:
+  - ${env}
+  - python
+  - ${program}
+parameters:
+  warmup_s:
+    values: [2, 3]
+  runs_s:
+    values: [2, 3]
+  repeats:
+    value: 5
+  # Host GPU index. With multiple agents, prefer launching each with
+  # CUDA_VISIBLE_DEVICES=<gpu> and leave device: 0 (remapped).
+  device:
+    value: 0
+  model:
+    value: models/LOP7/nnlf_lop7_model_float.onnx
+  batch_size:
+    value: 1
+  seed:
+    value: 42
+  project:
+    value: geyikbench
