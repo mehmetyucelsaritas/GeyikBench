@@ -1,12 +1,12 @@
 model: models/LOP7/nnlf_lop7_model_float.onnx
-device: 4
+device: 0
 # Stop each phase at whichever limit hits first. Set unused limits to null.
 # Time only:   warmup_s: 15, warmup_iters: null
 # Iters only:  warmup_s: null, warmup_iters: 10
 # Both:        warmup_s: 15, warmup_iters: 100  (stop at first)
-warmup_s: 3
+warmup_s: 10
 warmup_iters: null
-runs_s: 20
+runs_s: 10
 runs_iters: null
 # Single-sample by default; override only when measuring batched inference.
 batch_size: 1
