@@ -183,3 +183,4 @@ outputs/*
 # Local W&B sweep agent PIDs
 wandb_agent_gpu*.pid
 wandb/*
+models/*
