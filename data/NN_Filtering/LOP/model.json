@@ -1,0 +1,44 @@
+{ "model" : { 
+      "path": "../../LOP/model/model.py",
+      "class" : "Net",
+      "input_channels" : [ 
+          [ 
+            "rec_before_dbf_Y",
+            "rec_before_dbf_U",
+            "rec_before_dbf_V"
+          ],
+          [ 
+            "pred_Y",
+            "pred_U",
+            "pred_V"
+          ],
+          [ 
+            "bs_Y",
+            "bs_U",
+            "bs_V"
+          ],
+          [ "qp_base" ],
+          [ "qp_slice" ],
+          [ "ipb_Y" ]
+        ],
+      "input_kernels" : [ 
+          3,
+          3,
+          1,
+          1,
+          1,
+          1
+        ],
+      "D1" : 12,
+      "D2" : 8,
+      "D3" : 4,
+      "D4" : 2,
+      "D5" : 2,
+      "D6" : 24,
+      "N_Y" : 14,
+      "N_UV" : 4,  
+      "C" : 16,
+      "C1_Y" : 64,
+      "C1_UV" : 32,
+      "C21" : 16
+    } }
