@@ -131,7 +131,8 @@ def main() -> None:
         raise FileNotFoundError(f"Model not found: {model.resolve()}")
 
     # Prefer config-derived name once init has loaded sweep params.
-    run_name = f"warmup{warmup_s:g}_runs{runs_s:g}"
+    # Include model stem so multi-model grids (e.g. LOP7 prefixes) are distinct.
+    run_name = f"{model.stem}_warmup{warmup_s:g}_runs{runs_s:g}"
     run.name = run_name
 
     trials_dir = out_dir / "trials"
