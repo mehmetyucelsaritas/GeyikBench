@@ -1,0 +1,329 @@
+{
+  "version": "1.0",
+  "node_dim": 38,
+  "global_dim": 6,
+  "node_features": [
+    {
+      "index": 0,
+      "name": "type_Add",
+      "transform": "raw"
+    },
+    {
+      "index": 1,
+      "name": "type_AveragePool",
+      "transform": "raw"
+    },
+    {
+      "index": 2,
+      "name": "type_BatchNormalization",
+      "transform": "raw"
+    },
+    {
+      "index": 3,
+      "name": "type_Concat",
+      "transform": "raw"
+    },
+    {
+      "index": 4,
+      "name": "type_Conv",
+      "transform": "raw"
+    },
+    {
+      "index": 5,
+      "name": "type_Flatten",
+      "transform": "raw"
+    },
+    {
+      "index": 6,
+      "name": "type_Gemm",
+      "transform": "raw"
+    },
+    {
+      "index": 7,
+      "name": "type_GlobalAveragePool",
+      "transform": "raw"
+    },
+    {
+      "index": 8,
+      "name": "type_MaxPool",
+      "transform": "raw"
+    },
+    {
+      "index": 9,
+      "name": "type_Relu",
+      "transform": "raw"
+    },
+    {
+      "index": 10,
+      "name": "conv_kernel_size",
+      "transform": "standardize"
+    },
+    {
+      "index": 11,
+      "name": "conv_stride",
+      "transform": "standardize"
+    },
+    {
+      "index": 12,
+      "name": "conv_padding",
+      "transform": "standardize"
+    },
+    {
+      "index": 13,
+      "name": "conv_dilation",
+      "transform": "standardize"
+    },
+    {
+      "index": 14,
+      "name": "conv_groups",
+      "transform": "log1p_standardize"
+    },
+    {
+      "index": 15,
+      "name": "conv_bias",
+      "transform": "raw"
+    },
+    {
+      "index": 16,
+      "name": "linear_in_features",
+      "transform": "log1p_standardize"
+    },
+    {
+      "index": 17,
+      "name": "linear_out_features",
+      "transform": "log1p_standardize"
+    },
+    {
+      "index": 18,
+      "name": "linear_bias",
+      "transform": "raw"
+    },
+    {
+      "index": 19,
+      "name": "pool_kernel_size",
+      "transform": "standardize"
+    },
+    {
+      "index": 20,
+      "name": "pool_stride",
+      "transform": "standardize"
+    },
+    {
+      "index": 21,
+      "name": "pool_padding",
+      "transform": "standardize"
+    },
+    {
+      "index": 22,
+      "name": "weight_size",
+      "transform": "log1p_standardize"
+    },
+    {
+      "index": 23,
+      "name": "input_size_with_weight",
+      "transform": "log1p_standardize"
+    },
+    {
+      "index": 24,
+      "name": "input_size",
+      "transform": "log1p_standardize"
+    },
+    {
+      "index": 25,
+      "name": "input_channels",
+      "transform": "log1p_standardize"
+    },
+    {
+      "index": 26,
+      "name": "input_w",
+      "transform": "standardize"
+    },
+    {
+      "index": 27,
+      "name": "input_h",
+      "transform": "standardize"
+    },
+    {
+      "index": 28,
+      "name": "output_size",
+      "transform": "log1p_standardize"
+    },
+    {
+      "index": 29,
+      "name": "output_channels",
+      "transform": "log1p_standardize"
+    },
+    {
+      "index": 30,
+      "name": "output_w",
+      "transform": "standardize"
+    },
+    {
+      "index": 31,
+      "name": "output_h",
+      "transform": "standardize"
+    },
+    {
+      "index": 32,
+      "name": "flops",
+      "transform": "log1p_standardize"
+    },
+    {
+      "index": 33,
+      "name": "arith_intensity",
+      "transform": "log1p_standardize"
+    },
+    {
+      "index": 34,
+      "name": "mac_node",
+      "transform": "log1p_standardize"
+    },
+    {
+      "index": 35,
+      "name": "flops_share",
+      "transform": "standardize"
+    },
+    {
+      "index": 36,
+      "name": "mac_share",
+      "transform": "standardize"
+    },
+    {
+      "index": 37,
+      "name": "weight_share",
+      "transform": "standardize"
+    }
+  ],
+  "global_features": [
+    {
+      "index": 0,
+      "name": "log1p_total_flops",
+      "transform": "standardize"
+    },
+    {
+      "index": 1,
+      "name": "log1p_total_mac",
+      "transform": "standardize"
+    },
+    {
+      "index": 2,
+      "name": "log1p_total_weight",
+      "transform": "standardize"
+    },
+    {
+      "index": 3,
+      "name": "full_graph_arith_intensity",
+      "transform": "log1p_standardize"
+    },
+    {
+      "index": 4,
+      "name": "density",
+      "transform": "standardize"
+    },
+    {
+      "index": 5,
+      "name": "batch_size",
+      "transform": "standardize"
+    }
+  ],
+  "transform_groups": {
+    "raw_node": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      15,
+      18
+    ],
+    "standardize_node": [
+      10,
+      11,
+      12,
+      13,
+      19,
+      20,
+      21,
+      26,
+      27,
+      30,
+      31,
+      35,
+      36,
+      37
+    ],
+    "log1p_standardize_node": [
+      14,
+      16,
+      17,
+      22,
+      23,
+      24,
+      25,
+      28,
+      29,
+      32,
+      33,
+      34
+    ],
+    "standardize_global": [
+      0,
+      1,
+      2,
+      4,
+      5
+    ],
+    "log1p_standardize_global": [
+      3
+    ]
+  },
+  "pt_file_schema": {
+    "source_stem": "str",
+    "num_nodes": "int",
+    "x": {
+      "shape": [
+        "num_nodes",
+        38
+      ],
+      "dtype": "float32"
+    },
+    "globals": {
+      "shape": [
+        6
+      ],
+      "dtype": "float32"
+    },
+    "y_infer_raw": "float"
+  },
+  "target": {
+    "name": "y_infer_raw",
+    "transform": "log1p_standardize",
+    "inference_inverse": "expm1(y_pred * target_std + target_mean)"
+  },
+  "formulas": {
+    "mac_node": "input_size / 4 + output_size / 4 + weight_size",
+    "flops_share": "flops / total_flops",
+    "mac_share": "mac_node / total_mac",
+    "weight_share": "weight_size / total_weight",
+    "full_graph_arith_intensity": "total_flops / total_mac",
+    "density": "num_edges / (num_nodes * (num_nodes - 1))",
+    "batch_size": "parsed from source_stem prefix bs* and stored in globals[5]"
+  },
+  "excluded_fields": {
+    "node": [
+      "batch_size",
+      "bytes",
+      "pool_ceil_mode"
+    ],
+    "pt_file": [
+      "batch_size",
+      "y_train_raw"
+    ]
+  },
+  "preprocessing_note": "Features in .pt files are stored raw. Apply log1p/standardize at training time using transform_groups fit on the training split only."
+}
