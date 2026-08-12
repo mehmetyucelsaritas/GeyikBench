@@ -184,3 +184,4 @@ outputs/*
 wandb_agent_gpu*.pid
 wandb/*
 models/*
+exports/*
