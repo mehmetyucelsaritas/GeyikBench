@@ -45,9 +45,7 @@ def preprocess_data(ctx: Context) -> None:
 
 
 @task
-def benchmark(
-    ctx: Context, device: int = 0, extra: str = "", lock_clocks: bool = True
-) -> None:
+def benchmark(ctx: Context, device: int = 0, extra: str = "", lock_clocks: bool = True) -> None:
     """Run ONNX model benchmark locally (Hydra overrides via ``extra``).
 
     Pins application clocks on ``--device`` only (default GPU 0). Example::
@@ -67,6 +65,22 @@ def benchmark(
         extra = f"{extra} benchmark.device={gpu}".strip()
     ctx.run(
         f"PYTHONPATH=src python src/{PROJECT_NAME}/benchmark.py {extra}",
+        echo=True,
+        pty=not WINDOWS,
+    )
+
+
+@task
+def export_dataset(ctx: Context, runs: str, output: str) -> None:
+    """Export profiling runs as a geyik training dataset (manifest.jsonl + ONNX copies).
+
+    ``runs`` is a comma-separated list of run directories. Example::
+
+        invoke export-dataset --runs=outputs/2026-07-30_19-32-44_lop7_1h --output=exports/lop7_full
+    """
+    run_args = " ".join(part.strip() for part in runs.split(",") if part.strip())
+    ctx.run(
+        f"PYTHONPATH=src python src/{PROJECT_NAME}/export_dataset.py --runs {run_args} --output {output}",
         echo=True,
         pty=not WINDOWS,
     )
@@ -106,9 +120,9 @@ def _wandb_timing_sweep_dir(sweep_token: str | None = None) -> "Path":
     legacy = root / "wandb_timing_sweep" / token
     if legacy.is_dir():
         return legacy.resolve()
-    legacy_dated = sorted((root / "wandb_timing_sweep").glob(f"*_{token}")) if (
-        root / "wandb_timing_sweep"
-    ).is_dir() else []
+    legacy_dated = (
+        sorted((root / "wandb_timing_sweep").glob(f"*_{token}")) if (root / "wandb_timing_sweep").is_dir() else []
+    )
     if legacy_dated:
         return legacy_dated[-1].resolve()
     bare = root / token
@@ -276,9 +290,7 @@ def wandb_sweep_timing_agent(
     else:
         gpu_ids = [int(x.strip()) for x in devices.split(",") if x.strip()]
 
-    path = sweep_id if "/" in sweep_id else (
-        f"{entity}/{project}/{sweep_id}" if entity else f"{project}/{sweep_id}"
-    )
+    path = sweep_id if "/" in sweep_id else (f"{entity}/{project}/{sweep_id}" if entity else f"{project}/{sweep_id}")
     sweep_token = path.rstrip("/").split("/")[-1]
     agent_cmd = ["wandb", "agent"]
     if count > 0:
@@ -294,11 +306,7 @@ def wandb_sweep_timing_agent(
                 continue
             key, value = line.split("=", 1)
             env_base[key.strip()] = value.strip().strip("'").strip('"')
-    env_base["PYTHONPATH"] = (
-        f"src{os.pathsep}{env_base['PYTHONPATH']}"
-        if env_base.get("PYTHONPATH")
-        else "src"
-    )
+    env_base["PYTHONPATH"] = f"src{os.pathsep}{env_base['PYTHONPATH']}" if env_base.get("PYTHONPATH") else "src"
     env_base["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     # Agent + child runs write under outputs/<date>_<sweep>/wandb, not repo-root wandb/.
     env_base["WANDB_DIR"] = str(_wandb_timing_sweep_dir(sweep_token))
@@ -343,9 +351,7 @@ def wandb_sweep_timing_agent(
             except OSError:
                 pass
             raise RuntimeError(
-                "wandb agent failed on GPU(s): "
-                + ", ".join(f"{gpu} (exit {code})" for gpu, code in failures)
-                + hint
+                "wandb agent failed on GPU(s): " + ", ".join(f"{gpu} (exit {code})" for gpu, code in failures) + hint
             )
     except KeyboardInterrupt:
         print("Stopping agents...")
@@ -353,7 +359,6 @@ def wandb_sweep_timing_agent(
             proc.terminate()
             log_fh.close()
         raise
-
 
 
 @task
@@ -370,9 +375,7 @@ def _with_dotenv(command: str) -> str:
     return command
 
 
-def _docker_run_benchmark(
-    ctx: Context, script: str, device: int, extra: str, gpus: str = "all"
-) -> None:
+def _docker_run_benchmark(ctx: Context, script: str, device: int, extra: str, gpus: str = "all") -> None:
     """Run a benchmark script inside a bind-mounted container.
 
     Uses ``--gpus all`` (default) so CUDA/NVML indices match the host. Selection
@@ -404,9 +407,7 @@ def _normalize_docker_gpu_selection(device: int, gpus: str) -> tuple[int, str]:
     if value.startswith("device="):
         selected = value.split("=", 1)[1].split(",")[0].strip()
         if not selected.isdigit():
-            raise ValueError(
-                f"Unsupported --gpus value {gpus!r}; use --device N with --gpus all"
-            )
+            raise ValueError(f"Unsupported --gpus value {gpus!r}; use --device N with --gpus all")
         return int(selected), "all"
     return device, value
 
@@ -442,10 +443,7 @@ def docker_lock_gpu_clocks(
         invoke docker-lock-gpu-clocks --devices=all
         invoke docker-lock-gpu-clocks --reset --devices=0
     """
-    env = (
-        f"-e MEM_MHZ={mem} -e GRAPHICS_MHZ={graphics} "
-        f"-e RESET={'1' if reset else '0'} -e GPU_IDS={devices}"
-    )
+    env = f"-e MEM_MHZ={mem} -e GRAPHICS_MHZ={graphics} -e RESET={'1' if reset else '0'} -e GPU_IDS={devices}"
     if power > 0:
         env += f" -e POWER_W={power}"
     # Root inside privileged container can call nvidia-smi clock/power APIs.
@@ -478,9 +476,7 @@ def docker_benchmark(
     device, gpus = _normalize_docker_gpu_selection(device, gpus)
     if lock_clocks:
         docker_lock_gpu_clocks(ctx, devices=str(device))
-    _docker_run_benchmark(
-        ctx, f"src/{PROJECT_NAME}/benchmark.py", device=device, extra=extra, gpus=gpus
-    )
+    _docker_run_benchmark(ctx, f"src/{PROJECT_NAME}/benchmark.py", device=device, extra=extra, gpus=gpus)
 
 
 @task
