@@ -34,7 +34,11 @@ from geyikbench.benchmark import (
 
 @dataclass
 class OrtNodeTiming:
-    """Mean timing for one graph node across profiled inferences."""
+    """Mean timing and energy for one graph node across profiled inferences.
+
+    Energy fields are filled in ``merge_ort_runtime_nvml_power`` as
+    ``dur_ms * power_w`` (mJ). Zero until power is known.
+    """
 
     index: int
     name: str
@@ -42,6 +46,13 @@ class OrtNodeTiming:
     dur_ms_mean: float
     dur_ms_std: float
     cum_ms_mean: float
+    energy_mj_mean: float = 0.0
+    energy_mj_std: float = 0.0
+    cum_mj_mean: float = 0.0
+    cum_ms_ci95_lo: float = float("nan")
+    cum_ms_ci95_hi: float = float("nan")
+    cum_mj_ci95_lo: float = float("nan")
+    cum_mj_ci95_hi: float = float("nan")
 
 
 @dataclass
@@ -171,7 +182,8 @@ def profile_onnx(
 
     Warmup uses a non-profiled session. The profiled session runs
     ``settle_iters`` untimed inferences, then measures until ``runs_s`` /
-    ``runs_iters``.
+    ``runs_iters``. The chrome-trace is parsed into node timings and then
+    deleted; keep ``result.json`` / ``ort_nodes.json`` for labels.
     """
     model_path = Path(model_path)
     profile_file_prefix = Path(profile_file_prefix)
@@ -213,14 +225,18 @@ def profile_onnx(
     providers_active = list(sess.get_providers())
     del sess
 
-    events = json.loads(profile_path.read_text())
-    runs = parse_kernel_runs(events)
-    if measure_iters > 0 and len(runs) > measure_iters:
-        runs = runs[-measure_iters:]
-        settle_applied = 0
-    else:
-        settle_applied = settle_iters
-    totals_ms, nodes = aggregate_kernel_runs(runs, settle_iters=settle_applied)
+    try:
+        events = json.loads(profile_path.read_text())
+        runs = parse_kernel_runs(events)
+        del events
+        if measure_iters > 0 and len(runs) > measure_iters:
+            runs = runs[-measure_iters:]
+            settle_applied = 0
+        else:
+            settle_applied = settle_iters
+        totals_ms, nodes = aggregate_kernel_runs(runs, settle_iters=settle_applied)
+    finally:
+        profile_path.unlink(missing_ok=True)
 
     return OrtProfileResult(
         model=str(model_path),
@@ -231,7 +247,7 @@ def profile_onnx(
         runs_iters=measure_iters,
         settle_iters=settle_iters,
         n_nodes=len(nodes),
-        profile_path=str(profile_path),
+        profile_path="",
         latency_ms=totals_ms,
         latency_ms_mean=statistics.fmean(totals_ms) if totals_ms else float("nan"),
         latency_ms_std=statistics.pstdev(totals_ms) if len(totals_ms) > 1 else 0.0,
@@ -239,6 +255,40 @@ def profile_onnx(
         latency_ms_p95=_percentile(totals_ms, 95),
         nodes=nodes,
     )
+
+
+def _t_crit_95(n: int) -> float:
+    """Two-sided 95% Student-t critical value for df = n - 1."""
+    table = {
+        2: 12.7062047364,
+        3: 4.30265272991,
+        4: 3.18244630528,
+        5: 2.7764451052,
+        6: 2.57058183564,
+        7: 2.44691185114,
+        8: 2.36462425159,
+        9: 2.30600405321,
+        10: 2.26215716274,
+        15: 2.14478668792,
+        20: 2.09302405441,
+        30: 2.04522964213,
+    }
+    if n < 2:
+        return float("nan")
+    return table.get(n, 1.96)
+
+
+def _attach_node_energy(nodes: list[OrtNodeTiming], power_w: float) -> None:
+    """Set per-node and cumulative energy from NVML mean power (mJ = ms × W)."""
+    if not (power_w == power_w and power_w > 0):
+        return
+    for node in nodes:
+        node.energy_mj_mean = float(node.dur_ms_mean) * power_w
+        node.energy_mj_std = float(node.dur_ms_std) * power_w
+        node.cum_mj_mean = float(node.cum_ms_mean) * power_w
+        if node.cum_ms_ci95_lo == node.cum_ms_ci95_lo:
+            node.cum_mj_ci95_lo = float(node.cum_ms_ci95_lo) * power_w
+            node.cum_mj_ci95_hi = float(node.cum_ms_ci95_hi) * power_w
 
 
 def _mean_or_nan(values: list[float]) -> float:
@@ -280,7 +330,17 @@ def aggregate_ort_trials(orts: list[OrtProfileResult]) -> OrtProfileResult:
     mean_ms = dur_stack.mean(axis=0)
     # Prefer across-trial std of means; fall back to mean within-trial std.
     across_std = dur_stack.std(axis=0, ddof=0) if len(kept) > 1 else std_stack[0]
-    cum_ms = np.cumsum(mean_ms)
+    cum_stack = np.cumsum(dur_stack, axis=1)
+    n_trials = int(cum_stack.shape[0])
+    cum_ms = cum_stack.mean(axis=0)
+    if n_trials >= 2:
+        sem = cum_stack.std(axis=0, ddof=1) / float(n_trials) ** 0.5
+        t_crit = _t_crit_95(n_trials)
+        cum_lo = cum_ms - t_crit * sem
+        cum_hi = cum_ms + t_crit * sem
+    else:
+        cum_lo = np.full_like(cum_ms, float("nan"))
+        cum_hi = np.full_like(cum_ms, float("nan"))
     nodes = [
         OrtNodeTiming(
             index=i,
@@ -289,6 +349,8 @@ def aggregate_ort_trials(orts: list[OrtProfileResult]) -> OrtProfileResult:
             dur_ms_mean=float(mean_ms[i]),
             dur_ms_std=float(across_std[i]),
             cum_ms_mean=float(cum_ms[i]),
+            cum_ms_ci95_lo=float(cum_lo[i]),
+            cum_ms_ci95_hi=float(cum_hi[i]),
         )
         for i in range(n_nodes)
     ]
@@ -352,6 +414,7 @@ def merge_ort_runtime_nvml_power(
 
     power_mean = float(payload["power_w_mean"])
     ort_mean = float(ort.latency_ms_mean)
+    _attach_node_energy(ort.nodes, power_mean)
 
     payload["latency_source"] = "ort_profiler"
     payload["power_source"] = "nvml"
@@ -376,7 +439,6 @@ def merge_ort_runtime_nvml_power(
     payload["steady_iters"] = len(ort.latency_ms)
     payload["ort_profiler"] = ort.to_dict()
     if ort_trials is not None and len(ort_trials) > 1:
-        payload["ort_profiler"]["trial_profile_paths"] = [o.profile_path for o in ort_trials]
         payload["ort_profiler"]["trials"] = len(ort_trials)
     payload["backend"] = "onnxruntime+ort_profiler"
     return payload

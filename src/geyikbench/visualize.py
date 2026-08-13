@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 from pathlib import Path
 from typing import Any
@@ -12,11 +13,48 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 import wandb
+
+_ORT_OP_COLORS = {
+    "Add": "#2ca02c",
+    "Concat": "#bcbd22",
+    "Conv": "#1f77b4",
+    "MaxPool": "#17becf",
+    "Mul": "#9467bd",
+    "PRelu": "#ff7f0e",
+    "Resize": "#e377c2",
+    "Slice": "#d62728",
+    "Clip": "#8c564b",
+    "Split": "#7f7f7f",
+}
 
 
 # Keep in sync with geyikbench.benchmark._METRIC_SKIP_S / _steady_start_index.
 _METRIC_SKIP_S = 1.0
+
+_T_CRIT_95 = {
+    2: 12.7062047364,
+    3: 4.30265272991,
+    4: 3.18244630528,
+    5: 2.7764451052,
+    6: 2.57058183564,
+    7: 2.44691185114,
+    8: 2.36462425159,
+    9: 2.30600405321,
+    10: 2.26215716274,
+    15: 2.14478668792,
+    20: 2.09302405441,
+    30: 2.04522964213,
+}
+
+
+def _t_crit_95(n: int) -> float:
+    """Two-sided 95% Student-t critical value for df = n - 1."""
+    if n < 2:
+        return float("nan")
+    return _T_CRIT_95.get(n, 1.96)
 
 
 def _steady_start_index(latencies_ms: list[float], skip_s: float = _METRIC_SKIP_S) -> int:
@@ -50,6 +88,97 @@ def _histogram_figure(
     ax.set_ylabel("count")
     ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
+    return fig
+
+
+def _ort_cumulative_figure(
+    nodes: list[dict[str, Any]],
+    *,
+    y_key: str,
+    ylabel: str,
+    title: str,
+    ci_lo_key: str | None = None,
+    ci_hi_key: str | None = None,
+    trial_totals: list[float] | None = None,
+) -> Any | None:
+    """Op-colored cumulative mean vs layer index (optional 95% CI band)."""
+    if not nodes:
+        return None
+    ys = [float(n.get(y_key) or 0.0) for n in nodes]
+    ops = [str(n.get("op_name") or "") for n in nodes]
+    xs = list(range(len(nodes)))
+    colors = [_ORT_OP_COLORS.get(op, "#333333") for op in ops]
+
+    fig, ax = plt.subplots(figsize=(9, 5.0))
+    i = 0
+    while i < len(nodes):
+        j = i + 1
+        while j < len(nodes) and ops[j] == ops[i]:
+            j += 1
+        ax.axvspan(i - 0.5, j - 0.5, color=colors[i], alpha=0.08, linewidth=0, zorder=0)
+        i = j
+
+    stored_lo = [n.get(ci_lo_key) for n in nodes] if ci_lo_key else []
+    stored_hi = [n.get(ci_hi_key) for n in nodes] if ci_hi_key else []
+
+    def _finite_ci(v: Any) -> bool:
+        return isinstance(v, (int, float)) and v == v
+
+    has_stored_ci = bool(
+        stored_lo
+        and stored_hi
+        and _finite_ci(stored_lo[-1])
+        and _finite_ci(stored_hi[-1])
+    )
+    drew_ci = False
+    lo: list[float] = []
+    hi: list[float] = []
+    if has_stored_ci:
+        lo = [float(v) for v in stored_lo]
+        hi = [float(v) for v in stored_hi]
+    elif trial_totals and len(trial_totals) >= 2 and ys and ys[-1] > 0:
+        n_tot = len(trial_totals)
+        t_crit = _t_crit_95(n_tot)
+        sem = statistics.stdev(trial_totals) / math.sqrt(n_tot)
+        half_end = t_crit * sem
+        lo = [y - half_end * (y / ys[-1]) for y in ys]
+        hi = [y + half_end * (y / ys[-1]) for y in ys]
+    if lo and hi:
+        ax.fill_between(
+            xs, lo, hi, facecolor="#4c4c4c", edgecolor="#4c4c4c",
+            alpha=0.28, linewidth=0.8, zorder=1, label="95% CI",
+        )
+        ax.plot(xs, lo, color="#4c4c4c", linewidth=0.8, alpha=0.85, zorder=2)
+        ax.plot(xs, hi, color="#4c4c4c", linewidth=0.8, alpha=0.85, zorder=2)
+        drew_ci = True
+
+    ax.plot(xs, ys, color="#222222", linewidth=1.0, alpha=0.85, zorder=2)
+    ax.scatter(xs, ys, c=colors, s=14, zorder=3, linewidths=0)
+    ax.set_title(title)
+    ax.set_xlabel("Layer index")
+    ax.set_ylabel(ylabel)
+    ax.grid(True, alpha=0.25, zorder=0)
+    ax.set_xlim(-0.5, len(nodes) - 0.5)
+    ax.set_ylim(bottom=0)
+
+    present = [op for op in _ORT_OP_COLORS if op in set(ops)]
+    handles: list[Any] = []
+    if drew_ci:
+        handles.append(Patch(facecolor="#4c4c4c", alpha=0.25, label="95% CI"))
+    handles.extend(
+        Line2D([0], [0], marker="o", color="w", markerfacecolor=_ORT_OP_COLORS[op], markersize=8, label=op)
+        for op in present
+    )
+    ax.legend(
+        handles=handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.14),
+        ncol=min(6, max(1, len(handles))),
+        frameon=False,
+        fontsize=9,
+    )
+    fig.tight_layout()
+    fig.subplots_adjust(bottom=0.22)
     return fig
 
 
@@ -220,6 +349,44 @@ def populate_wandb_run(
                 str(png_path), caption=f"{key} vs sample"
             )
             plt.close(series_fig)
+
+    ort_nodes = (data.get("ort_profiler") or {}).get("nodes") or []
+    if ort_nodes:
+        plots_dir = output_dir / "plots"
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        runtime_fig = _ort_cumulative_figure(
+            ort_nodes,
+            y_key="cum_ms_mean",
+            ylabel="Cumulative runtime (ms)",
+            title=f"{run_name} — ORT cumulative runtime",
+            ci_lo_key="cum_ms_ci95_lo",
+            ci_hi_key="cum_ms_ci95_hi",
+            trial_totals=list(data.get("latency_ms") or []),
+        )
+        if runtime_fig is not None:
+            png_path = plots_dir / "lop7_ort_profiler_index_vs_runtime.png"
+            runtime_fig.savefig(png_path, dpi=150)
+            media_images["plots/ort_cumulative_runtime"] = wandb.Image(
+                str(png_path), caption="ORT cumulative runtime vs layer index"
+            )
+            plt.close(runtime_fig)
+        energy_fig = _ort_cumulative_figure(
+            ort_nodes,
+            y_key="cum_mj_mean",
+            ylabel="Cumulative energy (mJ)",
+            title=f"{run_name} — ORT cumulative energy",
+            ci_lo_key="cum_mj_ci95_lo",
+            ci_hi_key="cum_mj_ci95_hi",
+            trial_totals=list(data.get("energy_mj") or []),
+        )
+        if energy_fig is not None:
+            if any(float(n.get("cum_mj_mean") or 0) for n in ort_nodes):
+                png_path = plots_dir / "lop7_ort_profiler_index_vs_energy.png"
+                energy_fig.savefig(png_path, dpi=150)
+                media_images["plots/ort_cumulative_energy"] = wandb.Image(
+                    str(png_path), caption="ORT cumulative energy vs layer index"
+                )
+            plt.close(energy_fig)
 
     if media_images:
         wandb.log(media_images)
