@@ -12,3 +12,19 @@ runs_iters: null
 batch_size: 1
 # Written under the Hydra run dir so each experiment keeps its own report.
 output: ${hydra:runtime.output_dir}/result.json
+# When true: two separate passes with the same warmup_s / runs_s budgets —
+#   1) ORT profiler → runtime (latency_ms_*, per-node cum in ort_profiler.nodes)
+#   2) benchmark_onnx (no profiler) → NVML power
+# energy = ort_latency_ms * power_w.
+use_ort_profiler: false
+# Independent full-pass repeats. With use_ort_profiler=true and trials>1:
+# all ORT trials run back-to-back, then all NVML power trials (lower CI).
+# Labels are means across trials. Override e.g. benchmark.trials=10.
+# Not the same as sweep ``repeats`` in wandb_sweep_timing.
+trials: 10
+ort_profiler:
+  # After creating the profiled session, run this many inferences before the
+  # timed window and drop them from aggregates.
+  settle_iters: 3
+  # Chrome-trace prefix; default is <output_dir>/ort_profile
+  profile_file_prefix: null

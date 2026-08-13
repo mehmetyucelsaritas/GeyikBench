@@ -45,6 +45,8 @@ MANIFEST_METRIC_KEYS = [
     "device_index",
     "device_name",
     "backend",
+    "latency_source",
+    "power_source",
 ]
 
 

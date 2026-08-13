@@ -596,7 +596,18 @@ def _summarize(
 
 @hydra.main(version_base="1.3", config_path="../../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
-    """Measure inference latency and GPU power for an ONNX model using NVML."""
+    """Measure ONNX inference labels (latency + NVML power).
+
+    Default: wall-clock latency via ``benchmark_onnx``.
+    With ``benchmark.use_ort_profiler=true``: two separate passes with the same
+    ``warmup_s`` / ``runs_s`` budgets —
+
+    1. ORT profiler → runtime labels
+    2. ``benchmark_onnx`` (no profiler) → NVML power
+
+    ``benchmark.trials`` (default 1) repeats the full pass; with ORT profiler,
+    all ORT trials run first, then all NVML power trials.
+    """
     bench = cfg.benchmark
     model = Path(to_absolute_path(str(bench.model)))
     if model.suffix.lower() != ".onnx":
@@ -606,20 +617,148 @@ def main(cfg: DictConfig) -> None:
 
     np.random.seed(int(cfg.experiment.seed))
 
-    result = benchmark_onnx(
-        model_path=model,
-        device_index=int(bench.device),
-        warmup_s=_optional_float(OmegaConf.select(bench, "warmup_s")),
-        runs_s=_optional_float(OmegaConf.select(bench, "runs_s")),
-        warmup_iters=_optional_int(OmegaConf.select(bench, "warmup_iters")),
-        runs_iters=_optional_int(OmegaConf.select(bench, "runs_iters")),
-        # Optional; defaults to single-sample when omitted.
-        batch_size=int(OmegaConf.select(bench, "batch_size", default=1)),
-    )
-    payload = {
-        "experiment": OmegaConf.to_container(cfg.experiment, resolve=True),
-        **result.to_dict(),
-    }
+    warmup_s = _optional_float(OmegaConf.select(bench, "warmup_s"))
+    runs_s = _optional_float(OmegaConf.select(bench, "runs_s"))
+    warmup_iters = _optional_int(OmegaConf.select(bench, "warmup_iters"))
+    runs_iters = _optional_int(OmegaConf.select(bench, "runs_iters"))
+    batch_size = int(OmegaConf.select(bench, "batch_size", default=1))
+    device_index = int(bench.device)
+    experiment = OmegaConf.to_container(cfg.experiment, resolve=True)
+    use_ort = bool(OmegaConf.select(bench, "use_ort_profiler", default=False))
+    n_trials = int(OmegaConf.select(bench, "trials", default=1))
+    if n_trials < 1:
+        raise ValueError(f"benchmark.trials must be >= 1, got {n_trials}")
+
+    if use_ort:
+        from geyikbench.ort_profiler import merge_ort_runtime_nvml_power, profile_onnx
+
+        output_hint = OmegaConf.select(bench, "output")
+        prefix_cfg = OmegaConf.select(bench, "ort_profiler.profile_file_prefix")
+        if prefix_cfg is not None:
+            profile_prefix = Path(to_absolute_path(str(prefix_cfg)))
+        elif output_hint is not None:
+            profile_prefix = Path(to_absolute_path(str(output_hint))).parent / "ort_profile"
+        else:
+            profile_prefix = Path("ort_profile")
+        settle_iters = int(OmegaConf.select(bench, "ort_profiler.settle_iters", default=3))
+
+        ort_trials = []
+        print(
+            f"[INFO] Pass 1/2: ORT profiler (runtime) ×{n_trials} trial(s)",
+            file=sys.stderr,
+        )
+        for t in range(n_trials):
+            prefix = profile_prefix if n_trials == 1 else Path(f"{profile_prefix}_trial{t:02d}")
+            print(f"[INFO] ORT trial {t + 1}/{n_trials}", file=sys.stderr)
+            ort_trials.append(
+                profile_onnx(
+                    model_path=model,
+                    device_index=device_index,
+                    warmup_s=warmup_s,
+                    runs_s=runs_s,
+                    warmup_iters=warmup_iters,
+                    runs_iters=runs_iters,
+                    batch_size=batch_size,
+                    profile_file_prefix=prefix,
+                    settle_iters=settle_iters,
+                )
+            )
+
+        nvml_trials = []
+        print(
+            f"[INFO] Pass 2/2: benchmark_onnx (NVML power) ×{n_trials} trial(s)",
+            file=sys.stderr,
+        )
+        for t in range(n_trials):
+            print(f"[INFO] power trial {t + 1}/{n_trials}", file=sys.stderr)
+            nvml_trials.append(
+                benchmark_onnx(
+                    model_path=model,
+                    device_index=device_index,
+                    warmup_s=warmup_s,
+                    runs_s=runs_s,
+                    warmup_iters=warmup_iters,
+                    runs_iters=runs_iters,
+                    batch_size=batch_size,
+                )
+            )
+
+        payload = merge_ort_runtime_nvml_power(
+            nvml_trials[-1],
+            ort_trials[-1],
+            nvml_results=nvml_trials,
+            ort_trials=ort_trials,
+        )
+        payload["experiment"] = experiment
+        print(
+            f"[INFO] ORT profiler: trials={n_trials} n_nodes={payload['ort_profiler']['n_nodes']} "
+            f"latency_ms_mean={payload['latency_ms_mean']:.4f} "
+            f"power_w_mean={payload['power_w_mean']:.4f}",
+            file=sys.stderr,
+        )
+    else:
+        results = []
+        for t in range(n_trials):
+            if n_trials > 1:
+                print(f"[INFO] wall-clock trial {t + 1}/{n_trials}", file=sys.stderr)
+            results.append(
+                benchmark_onnx(
+                    model_path=model,
+                    device_index=device_index,
+                    warmup_s=warmup_s,
+                    runs_s=runs_s,
+                    warmup_iters=warmup_iters,
+                    runs_iters=runs_iters,
+                    batch_size=batch_size,
+                )
+            )
+        if n_trials == 1:
+            payload = {
+                "experiment": experiment,
+                **results[0].to_dict(),
+                "latency_source": "wall_clock",
+                "power_source": "nvml",
+                "trials": 1,
+            }
+        else:
+            # Across-trial means for primary labels; keep last trial's series.
+            import statistics as _stats
+
+            primary = results[-1].to_dict()
+            for key in (
+                "latency_ms_mean",
+                "latency_ms_p50",
+                "latency_ms_p95",
+                "energy_mj_mean",
+                "energy_mj_total",
+                "power_w_mean",
+                "temperature_c_mean",
+                "frequency_mhz_mean",
+                "frequency_mem_mhz_mean",
+                "frequency_graphics_mhz_mean",
+                "frequency_video_mhz_mean",
+                "throughput_inf_per_s",
+            ):
+                vals = [float(getattr(r, key)) for r in results]
+                primary[key] = _stats.fmean(vals)
+            lat_means = [float(r.latency_ms_mean) for r in results]
+            primary["latency_ms"] = lat_means
+            primary["latency_ms_std"] = _stats.pstdev(lat_means) if len(lat_means) > 1 else 0.0
+            primary["power_w"] = [float(r.power_w_mean) for r in results]
+            primary["energy_mj"] = [
+                float(r.latency_ms_mean) * float(r.power_w_mean) for r in results
+            ]
+            primary["energy_mj_std"] = (
+                _stats.pstdev(primary["energy_mj"]) if len(primary["energy_mj"]) > 1 else 0.0
+            )
+            payload = {
+                "experiment": experiment,
+                **primary,
+                "latency_source": "wall_clock",
+                "power_source": "nvml",
+                "trials": n_trials,
+            }
+
     # Do not print per-sample series (latency/power/freq arrays) — large and slow.
     _series_keys = {
         "latency_ms",
@@ -630,6 +769,7 @@ def main(cfg: DictConfig) -> None:
         "frequency_mem_mhz",
         "frequency_graphics_mhz",
         "frequency_video_mhz",
+        "ort_profiler",
     }
     summary = {k: v for k, v in payload.items() if k not in _series_keys}
     print(json.dumps(summary, indent=2))
@@ -639,6 +779,13 @@ def main(cfg: DictConfig) -> None:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, indent=2) + "\n")
         print(f"Wrote {output}", file=sys.stderr)
+
+        # Compact per-node table next to result.json when ORT profiling ran.
+        ort_block = payload.get("ort_profiler")
+        if isinstance(ort_block, dict) and ort_block.get("nodes"):
+            nodes_path = output.parent / "ort_nodes.json"
+            nodes_path.write_text(json.dumps(ort_block["nodes"], indent=2) + "\n")
+            print(f"Wrote {nodes_path}", file=sys.stderr)
 
         # Log to W&B from within this process so the wandb/ folder is written
         # into the same Hydra output dir (which is writable by the current process).

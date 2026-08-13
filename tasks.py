@@ -52,6 +52,8 @@ def benchmark(ctx: Context, device: int = 0, extra: str = "", lock_clocks: bool 
 
         invoke benchmark --device=0 --extra="experiment.name=lop7"
         invoke benchmark --no-lock-clocks --extra="experiment.name=lop7"
+        invoke benchmark --extra="benchmark.use_ort_profiler=true experiment.name=lop7_ort"
+        invoke benchmark --extra="benchmark.use_ort_profiler=true benchmark.trials=10"
     """
     import re
 
