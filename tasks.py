@@ -1,3 +1,4 @@
+import json
 import os
 
 from invoke import Context, task
@@ -137,6 +138,74 @@ def _wandb_timing_sweep_dir(sweep_token: str | None = None) -> "Path":
     return path.resolve()
 
 
+def _load_sweep_timing_config(config: str) -> dict:
+    """Load a timing-sweep YAML (local keys + W&B sweep schema)."""
+    from pathlib import Path
+
+    import yaml
+
+    path = Path(config)
+    if not path.is_file():
+        raise FileNotFoundError(f"Sweep config not found: {path.resolve()}")
+    data = yaml.safe_load(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError(f"Sweep config must be a mapping: {path}")
+    return data
+
+
+# Top-level keys used by invoke only; stripped before ``wandb sweep``.
+_SWEEP_LOCAL_KEYS = frozenset({"lock_clocks"})
+
+
+def _lock_clocks_from_config(config: str, override: bool | None) -> bool:
+    """Resolve GPU clock locking: CLI override wins, else YAML ``lock_clocks``."""
+    if override is not None:
+        return bool(override)
+    data = _load_sweep_timing_config(config)
+    return bool(data.get("lock_clocks", False))
+
+
+def _parse_lock_clocks_cli(value: str | bool | None) -> bool | None:
+    """Parse invoke ``lock_clocks``: ``auto`` → YAML; ``true``/``false`` → override."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if s in {"", "auto", "config", "default", "none"}:
+        return None
+    if s in {"1", "true", "yes", "on"}:
+        return True
+    if s in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"Invalid lock_clocks={value!r}; use auto, true, or false"
+    )
+
+
+def _wandb_sweep_config_path(config: str) -> str:
+    """Write a temp W&B sweep YAML with local-only keys removed, or return *config*."""
+    import tempfile
+    from pathlib import Path
+
+    import yaml
+
+    data = _load_sweep_timing_config(config)
+    if not _SWEEP_LOCAL_KEYS.intersection(data):
+        return config
+    wandb_cfg = {k: v for k, v in data.items() if k not in _SWEEP_LOCAL_KEYS}
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".yaml",
+        prefix=f"{Path(config).stem}_wandb_",
+        delete=False,
+        encoding="utf-8",
+    )
+    with tmp:
+        yaml.safe_dump(wandb_cfg, tmp, sort_keys=False, default_flow_style=False)
+    return tmp.name
+
+
 def _create_wandb_sweep(
     config: str = "configs/wandb/sweep_timing.yaml",
     project: str = "geyikbench",
@@ -161,11 +230,16 @@ def _create_wandb_sweep(
     parent = _wandb_timing_sweep_dir()
     env["WANDB_DIR"] = str(parent)
 
+    wandb_config = _wandb_sweep_config_path(config)
     cmd = ["wandb", "sweep", "--project", project]
     if entity:
         cmd.extend(["--entity", entity])
-    cmd.append(config)
-    proc = subprocess.run(cmd, env=env, capture_output=True, text=True, check=False)
+    cmd.append(wandb_config)
+    try:
+        proc = subprocess.run(cmd, env=env, capture_output=True, text=True, check=False)
+    finally:
+        if wandb_config != config:
+            Path(wandb_config).unlink(missing_ok=True)
     output = (proc.stdout or "") + "\n" + (proc.stderr or "")
     print(output, flush=True)
     if proc.returncode != 0:
@@ -202,9 +276,10 @@ def wandb_sweep_timing(
     project: str = "geyikbench",
     entity: str = "",
 ) -> None:
-    """Create a W&B Sweep for warmup_s × runs_s repeatability.
+    """Create a W&B Sweep over models in configs/wandb/sweep_timing.yaml.
 
-    Prints the sweep id / URL. Then start workers with::
+    Default config ORT-profiles each full ONNX under data/NN_Filtering (per-node
+    cumulative labels for geyik export). Prints the sweep id / URL. Then::
 
         invoke wandb-sweep-timing-agent --sweep-id=<id>
 
@@ -225,9 +300,13 @@ def wandb_sweep_timing_run(
     entity: str = "",
     count: int = 0,
     devices: str = "all",
-    lock_clocks: bool = True,
+    lock_clocks: str = "auto",
 ) -> None:
-    """Create a fresh W&B timing sweep and start agents immediately."""
+    """Create a fresh W&B timing sweep and start agents immediately.
+
+    GPU clock locking comes from ``lock_clocks`` in *config*. Pass
+    ``--lock-clocks=true|false`` to override; ``auto`` (default) uses the YAML.
+    """
     path = _create_wandb_sweep(config=config, project=project, entity=entity)
     print(f"Created sweep: {path}")
     wandb_sweep_timing_agent(
@@ -237,6 +316,7 @@ def wandb_sweep_timing_run(
         project=project,
         entity=entity,
         devices=devices,
+        config=config,
         lock_clocks=lock_clocks,
     )
 
@@ -250,7 +330,7 @@ def wandb_sweep_timing_agent(
     entity: str = "",
     devices: str = "all",
     config: str = "configs/wandb/sweep_timing.yaml",
-    lock_clocks: bool = True,
+    lock_clocks: str = "auto",
 ) -> None:
     """Run W&B Sweep agent(s) for the timing sweep.
 
@@ -258,8 +338,8 @@ def wandb_sweep_timing_agent(
     previous sweep is finished. Pass an existing id only while that sweep is still
     running.
 
-    ``devices=all`` launches one agent per visible GPU. By default pins equal
-    application clocks on those same GPUs only (unused cards stay unlocked).
+    ``devices=all`` launches one agent per visible GPU. Clock locking is read
+    from ``lock_clocks`` in *config* unless ``--lock-clocks=true|false`` is set.
 
     Example::
 
@@ -271,7 +351,11 @@ def wandb_sweep_timing_agent(
     import subprocess
     from pathlib import Path
 
-    if lock_clocks:
+    cli_override = _parse_lock_clocks_cli(lock_clocks)
+    do_lock = _lock_clocks_from_config(config, cli_override)
+    source = f"CLI ({lock_clocks})" if cli_override is not None else config
+    print(f"GPU clock lock: {do_lock} (from {source})")
+    if do_lock:
         docker_lock_gpu_clocks(ctx, devices=devices)
 
     if not sweep_id or sweep_id.strip().lower() in {"new", "create", "fresh"}:
@@ -361,6 +445,84 @@ def wandb_sweep_timing_agent(
             proc.terminate()
             log_fh.close()
         raise
+
+
+@task
+def wandb_sweep_timing_rerun(
+    ctx: Context,
+    run_dir: str = "",
+    sweep_dir: str = "",
+    model: str = "",
+    device: int = -1,
+    project: str = "",
+    trials: int = 0,
+    settle_iters: int = -1,
+    lock_clocks: str = "auto",
+    config: str = "configs/wandb/sweep_timing.yaml",
+) -> None:
+    """Re-profile one existing timing-sweep run and overwrite local + W&B artifacts.
+
+    Pass either ``--run-dir=.../warmup10_runs10_<id>`` or
+    ``--sweep-dir=.../timing_sweep_<id> --model=LOP3``.
+
+    Resumes the same W&B run id (``resume=must``) and rewrites ``result.json``,
+    ``ort_nodes.json``, and plots in place.
+
+    Example::
+
+        invoke wandb-sweep-timing-rerun \\
+          --run-dir=outputs/2026-08-13_20-29-05_timing_sweep_14f5omfr/warmup10_runs10_fzfw5b7m
+
+        invoke wandb-sweep-timing-rerun \\
+          --sweep-dir=outputs/2026-08-13_20-29-05_timing_sweep_14f5omfr --model=LOP3
+    """
+    from pathlib import Path
+
+    if not run_dir:
+        if not sweep_dir or not model:
+            raise ValueError("Provide --run-dir, or both --sweep-dir and --model")
+        sweep_path = Path(sweep_dir)
+        if not sweep_path.is_dir():
+            raise FileNotFoundError(f"Sweep directory not found: {sweep_path.resolve()}")
+        stem = Path(model).stem
+        matches = []
+        for result in sorted(sweep_path.glob("*/result.json")):
+            try:
+                payload = json.loads(result.read_text())
+            except json.JSONDecodeError:
+                continue
+            recorded = Path(str(payload.get("model") or ""))
+            if recorded.stem == stem:
+                matches.append(result.parent)
+        if not matches:
+            raise FileNotFoundError(f"No run for model={model!r} under {sweep_path}")
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"Multiple runs match model={model!r}: " + ", ".join(str(p) for p in matches)
+            )
+        run_dir = str(matches[0])
+
+    cli_override = _parse_lock_clocks_cli(lock_clocks)
+    do_lock = _lock_clocks_from_config(config, cli_override)
+    print(f"GPU clock lock: {do_lock} (from {'CLI' if cli_override is not None else config})")
+    if do_lock:
+        gpu = str(device) if device >= 0 else "all"
+        docker_lock_gpu_clocks(ctx, devices=gpu)
+
+    args = [f"--rerun-dir={run_dir}"]
+    if device >= 0:
+        args.append(f"--device={device}")
+    if project:
+        args.append(f"--project={project}")
+    if trials > 0:
+        args.append(f"--trials={trials}")
+    if settle_iters >= 0:
+        args.append(f"--settle-iters={settle_iters}")
+    ctx.run(
+        f"PYTHONPATH=src python src/{PROJECT_NAME}/wandb_sweep_timing.py " + " ".join(args),
+        echo=True,
+        pty=not WINDOWS,
+    )
 
 
 @task

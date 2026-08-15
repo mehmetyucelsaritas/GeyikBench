@@ -1,9 +1,16 @@
-# W&B Sweep: benchmark all LOP7 cumulative prefix ONNX models.
+# W&B Sweep: ORT-profile every full ONNX under data/NN_Filtering.
 # Create+run:  invoke wandb-sweep-timing-run
 # Agents:      invoke wandb-sweep-timing-agent --sweep-id=<id> --devices=all
 #
-# Each run records latency and energy (result.json + W&B).
+# Each run uses use_ort_profiler=true: ORT cumulative runtime per node, then
+# NVML power. Export with ``invoke export-dataset``; geyik expands each model
+# into one training sample per node prefix via nodes_file.
 # Metric kept for sweep schema; with repeats=1, CV is undefined.
+#
+# Local invoke option (stripped before ``wandb sweep``; not a W&B hyperparam).
+# Set true to pin GPU application clocks before agents start.
+# CLI override: ``invoke ... --lock-clocks=true|false`` (default ``auto`` = YAML).
+lock_clocks: false
 program: src/geyikbench/wandb_sweep_timing.py
 method: grid
 metric:
@@ -16,231 +23,37 @@ command:
   - ${program}
 parameters:
   warmup_s:
-    value: 5
+    value: 10
   runs_s:
-    value: 5
+    value: 10
+  # Outer sweep repeats (legacy wall-clock CV). Keep 1 when using ORT trials.
   repeats:
     value: 1
+  # Independent ORT + NVML full-pass repeats (CI / means). Same as benchmark.trials.
+  trials:
+    value: 10
+  use_ort_profiler:
+    value: true
+  settle_iters:
+    value: 3
   # Host GPU index. With multiple agents, prefer launching each with
   # CUDA_VISIBLE_DEVICES=<gpu> and leave device: 0 (remapped).
   device:
     value: 0
   model:
     values:
-      - data/NN_Filtering/LOP7/prefixes/prefix_001_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_002_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_003_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_004_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_005_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_006_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_007_Concat.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_008_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_009_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_010_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_011_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_012_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_013_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_014_Slice.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_015_Slice.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_016_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_017_Slice.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_018_Slice.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_019_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_020_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_021_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_022_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_023_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_024_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_025_Slice.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_026_Slice.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_027_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_028_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_029_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_030_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_031_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_032_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_033_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_034_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_035_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_036_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_037_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_038_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_039_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_040_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_041_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_042_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_043_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_044_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_045_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_046_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_047_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_048_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_049_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_050_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_051_MaxPool.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_052_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_053_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_054_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_055_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_056_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_057_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_058_Resize.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_059_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_060_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_061_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_062_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_063_Mul.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_064_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_065_Clip.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_066_Mul.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_067_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_068_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_069_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_070_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_071_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_072_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_073_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_074_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_075_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_076_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_077_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_078_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_079_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_080_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_081_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_082_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_083_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_084_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_085_MaxPool.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_086_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_087_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_088_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_089_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_090_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_091_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_092_Resize.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_093_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_094_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_095_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_096_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_097_Mul.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_098_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_099_Clip.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_100_Mul.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_101_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_102_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_103_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_104_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_105_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_106_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_107_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_108_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_109_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_110_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_111_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_112_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_113_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_114_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_115_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_116_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_117_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_118_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_119_MaxPool.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_120_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_121_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_122_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_123_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_124_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_125_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_126_Resize.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_127_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_128_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_129_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_130_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_131_Mul.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_132_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_133_Clip.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_134_Mul.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_135_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_136_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_137_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_138_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_139_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_140_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_141_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_142_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_143_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_144_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_145_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_146_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_147_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_148_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_149_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_150_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_151_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_152_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_153_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_154_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_155_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_156_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_157_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_158_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_159_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_160_MaxPool.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_161_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_162_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_163_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_164_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_165_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_166_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_167_Resize.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_168_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_169_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_170_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_171_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_172_Mul.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_173_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_174_Clip.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_175_Mul.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_176_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_177_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_178_Slice.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_179_Slice.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_180_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_181_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_182_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_183_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_184_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_185_Slice.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_186_Slice.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_187_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_188_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_189_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_190_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_191_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_192_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_193_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_194_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_195_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_196_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_197_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_198_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_199_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_200_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_201_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_202_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_203_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_204_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_205_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_206_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_207_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_208_Add.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_209_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_210_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_211_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_212_PRelu.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_213_Conv.onnx
-      - data/NN_Filtering/LOP7/prefixes/prefix_214_Concat.onnx
+      - data/NN_Filtering/HOP/HOP.onnx
+      - data/NN_Filtering/HOP4/HOP4.onnx
+      - data/NN_Filtering/LOP/LOP.onnx
+      - data/NN_Filtering/LOP3/LOP3.onnx
+      - data/NN_Filtering/LOP4/LOP4.onnx
+      - data/NN_Filtering/LOP5/LOP5.onnx
+      - data/NN_Filtering/LOP6/LOP6.onnx
+      - data/NN_Filtering/LOP7/LOP7.onnx
+      - data/NN_Filtering/VLOP/VLOP.onnx
+      - data/NN_Filtering/VLOP2/VLOP2.onnx
+      - data/NN_Filtering/VLOP3/VLOP3.onnx
+      - data/NN_Filtering/VLOP4/VLOP4.onnx
   batch_size:
     value: 1
   seed:

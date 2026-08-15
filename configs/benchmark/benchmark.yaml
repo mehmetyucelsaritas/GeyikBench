@@ -16,7 +16,7 @@ output: ${hydra:runtime.output_dir}/result.json
 #   1) ORT profiler → runtime (latency_ms_*, per-node cum in ort_profiler.nodes)
 #   2) benchmark_onnx (no profiler) → NVML power
 # energy = ort_latency_ms * power_w.
-use_ort_profiler: false
+use_ort_profiler: true
 # Independent full-pass repeats. With use_ort_profiler=true and trials>1:
 # all ORT trials run back-to-back, then all NVML power trials (lower CI).
 # Labels are means across trials. Override e.g. benchmark.trials=10.
@@ -26,5 +26,6 @@ ort_profiler:
   # After creating the profiled session, run this many inferences before the
   # timed window and drop them from aggregates.
   settle_iters: 3
-  # Chrome-trace prefix; default is <output_dir>/ort_profile
+  # Chrome-trace prefix; default is <output_dir>/ort_profile.
+  # The trace is parsed then deleted (keep result.json / ort_nodes.json).
   profile_file_prefix: null
