@@ -13,9 +13,9 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import wandb
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
-import wandb
 
 _ORT_OP_COLORS = {
     "Add": "#2ca02c",
@@ -124,12 +124,7 @@ def _ort_cumulative_figure(
     def _finite_ci(v: Any) -> bool:
         return isinstance(v, (int, float)) and v == v
 
-    has_stored_ci = bool(
-        stored_lo
-        and stored_hi
-        and _finite_ci(stored_lo[-1])
-        and _finite_ci(stored_hi[-1])
-    )
+    has_stored_ci = bool(stored_lo and stored_hi and _finite_ci(stored_lo[-1]) and _finite_ci(stored_hi[-1]))
     drew_ci = False
     lo: list[float] = []
     hi: list[float] = []
@@ -145,8 +140,15 @@ def _ort_cumulative_figure(
         hi = [y + half_end * (y / ys[-1]) for y in ys]
     if lo and hi:
         ax.fill_between(
-            xs, lo, hi, facecolor="#4c4c4c", edgecolor="#4c4c4c",
-            alpha=0.28, linewidth=0.8, zorder=1, label="95% CI",
+            xs,
+            lo,
+            hi,
+            facecolor="#4c4c4c",
+            edgecolor="#4c4c4c",
+            alpha=0.28,
+            linewidth=0.8,
+            zorder=1,
+            label="95% CI",
         )
         ax.plot(xs, lo, color="#4c4c4c", linewidth=0.8, alpha=0.85, zorder=2)
         ax.plot(xs, hi, color="#4c4c4c", linewidth=0.8, alpha=0.85, zorder=2)
