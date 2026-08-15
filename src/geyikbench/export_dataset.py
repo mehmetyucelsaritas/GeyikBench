@@ -5,7 +5,13 @@ ONNX model, and writes a self-contained export directory::
 
     exports/<name>/
     ├── manifest.jsonl   # one record per profiled model (runtime + energy labels)
-    └── models/          # copies of the profiled .onnx files
+    ├── models/          # copies of the profiled .onnx files
+    └── nodes/           # per-node cumulative runtime/energy (ORT profiler runs)
+
+Runs profiled with the ORT profiler also carry per-node cumulative labels. Those
+are written to ``nodes/<stem>.json`` in ORT execution order and referenced from
+the manifest via ``nodes_file``, so geyik can expand one model into one training
+sample per node prefix.
 
 Models are identified by the SHA-256 of their ONNX bytes so exports remain
 valid across machines. The geyik repo consumes this layout with its
@@ -26,6 +32,8 @@ import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+from geyikbench.ort_profiler import normalize_onnx_node_name
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -111,7 +119,33 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
-def build_record(payload: dict, result_path: Path, model_file: str, model_sha256: str, batch_size: int) -> dict:
+NODE_LABEL_KEYS = [
+    "index",
+    "onnx_node",
+    "name",
+    "op_name",
+    "dur_ms_mean",
+    "dur_ms_std",
+    "cum_ms_mean",
+    "cum_ms_ci95_lo",
+    "cum_ms_ci95_hi",
+    "energy_mj_mean",
+    "energy_mj_std",
+    "cum_mj_mean",
+    "cum_mj_ci95_lo",
+    "cum_mj_ci95_hi",
+]
+
+
+def build_record(
+    payload: dict,
+    result_path: Path,
+    model_file: str,
+    model_sha256: str,
+    batch_size: int,
+    nodes_file: str | None = None,
+    n_nodes: int | None = None,
+) -> dict:
     """Build one manifest record from a result payload."""
     experiment = payload.get("experiment") or {}
     run_dir = result_path.parent.resolve()
@@ -126,7 +160,34 @@ def build_record(payload: dict, result_path: Path, model_file: str, model_sha256
     }
     for key in MANIFEST_METRIC_KEYS:
         record[key] = payload.get(key)
+    if nodes_file is not None:
+        record["nodes_file"] = nodes_file
+        record["n_nodes"] = n_nodes
     return record
+
+
+def extract_node_labels(payload: dict) -> list[dict]:
+    """Return per-node cumulative labels in ORT execution order, or [] when absent.
+
+    Node records keep only the fields geyik needs to build prefix samples, with
+    ``onnx_node`` backfilled from the raw kernel name for older results.
+    """
+    nodes = (payload.get("ort_profiler") or {}).get("nodes") or []
+    labels: list[dict] = []
+    for node in nodes:
+        record = {key: node[key] for key in NODE_LABEL_KEYS if key in node}
+        if not record.get("onnx_node"):
+            record["onnx_node"] = normalize_onnx_node_name(node.get("name", ""))
+        labels.append(record)
+    return labels
+
+
+def write_node_labels(nodes: list[dict], nodes_dir: Path, stem: str) -> str:
+    """Write per-node cumulative labels next to the models and return the relative path."""
+    nodes_dir.mkdir(parents=True, exist_ok=True)
+    target = nodes_dir / f"{stem}.json"
+    target.write_text(json.dumps(nodes, indent=2) + "\n", encoding="utf-8")
+    return f"nodes/{target.name}"
 
 
 def export_dataset(run_dirs: list[Path], output_dir: Path) -> list[dict]:
@@ -134,7 +195,7 @@ def export_dataset(run_dirs: list[Path], output_dir: Path) -> list[dict]:
 
     Args:
         run_dirs: Benchmark run directories to scan for result.json files.
-        output_dir: Export directory to create (manifest.jsonl + models/).
+        output_dir: Export directory to create (manifest.jsonl + models/ + nodes/).
 
     Returns:
         The list of manifest records written.
@@ -145,6 +206,7 @@ def export_dataset(run_dirs: list[Path], output_dir: Path) -> list[dict]:
 
     models_dir = output_dir / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
+    nodes_dir = output_dir / "nodes"
 
     records: list[dict] = []
     seen_hashes: set[str] = set()
@@ -170,15 +232,23 @@ def export_dataset(run_dirs: list[Path], output_dir: Path) -> list[dict]:
         if not target_path.exists():
             shutil.copy2(model_path, target_path)
 
+        node_labels = extract_node_labels(payload)
+        nodes_file = None
+        if node_labels:
+            nodes_file = write_node_labels(node_labels, nodes_dir, Path(target_name).stem)
+
         record = build_record(
             payload,
             result_path,
             model_file=f"models/{target_name}",
             model_sha256=model_sha256,
             batch_size=onnx_batch_size(model_path),
+            nodes_file=nodes_file,
+            n_nodes=len(node_labels) or None,
         )
         records.append(record)
-        print(f"[ok] {model_path.name} ({model_sha256[:8]}) latency={record['latency_ms_mean']:.3f} ms")
+        node_note = f" nodes={len(node_labels)}" if node_labels else ""
+        print(f"[ok] {model_path.name} ({model_sha256[:8]}) latency={record['latency_ms_mean']:.3f} ms{node_note}")
 
     manifest_path = output_dir / "manifest.jsonl"
     with manifest_path.open("w", encoding="utf-8") as file:

@@ -38,6 +38,10 @@ class OrtNodeTiming:
 
     Energy fields are filled in ``merge_ort_runtime_nvml_power`` as
     ``dur_ms * power_w`` (mJ). Zero until power is known.
+
+    ``name`` is the raw chrome-trace event name; ``onnx_node`` is the same name
+    without the ``_kernel_time`` suffix so consumers can join back to the ONNX
+    graph (see ``normalize_onnx_node_name``).
     """
 
     index: int
@@ -46,6 +50,7 @@ class OrtNodeTiming:
     dur_ms_mean: float
     dur_ms_std: float
     cum_ms_mean: float
+    onnx_node: str = ""
     energy_mj_mean: float = 0.0
     energy_mj_std: float = 0.0
     cum_mj_mean: float = 0.0
@@ -83,10 +88,26 @@ class OrtProfileResult:
         return payload
 
 
+_KERNEL_TIME_SUFFIX = "_kernel_time"
+
+
 def _is_kernel_node(event: dict[str, Any]) -> bool:
     """True for op kernel timings (exclude fence_before / fence_after helpers)."""
     name = str(event.get("name") or "")
-    return name.endswith("_kernel_time")
+    return name.endswith(_KERNEL_TIME_SUFFIX)
+
+
+def normalize_onnx_node_name(kernel_name: str) -> str:
+    """Strip the ORT ``_kernel_time`` suffix to recover the ONNX node name.
+
+    Fused kernels keep their fusion path (for example
+    ``node_slice_2/GatherSliceToSplitFusion/``); consumers are expected to match
+    such names loosely against the ONNX graph.
+    """
+    name = str(kernel_name)
+    if name.endswith(_KERNEL_TIME_SUFFIX):
+        name = name[: -len(_KERNEL_TIME_SUFFIX)]
+    return name
 
 
 def parse_kernel_runs(events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -160,6 +181,7 @@ def aggregate_kernel_runs(
             dur_ms_mean=float(mean_ms[i]),
             dur_ms_std=float(std_ms[i]),
             cum_ms_mean=float(cum_ms[i]),
+            onnx_node=normalize_onnx_node_name(names[i]),
         )
         for i in range(modal_n)
     ]
@@ -349,6 +371,7 @@ def aggregate_ort_trials(orts: list[OrtProfileResult]) -> OrtProfileResult:
             dur_ms_mean=float(mean_ms[i]),
             dur_ms_std=float(across_std[i]),
             cum_ms_mean=float(cum_ms[i]),
+            onnx_node=ref.nodes[i].onnx_node,
             cum_ms_ci95_lo=float(cum_lo[i]),
             cum_ms_ci95_hi=float(cum_hi[i]),
         )
